@@ -4,16 +4,18 @@ from datetime import datetime
 from pymongo import MongoClient
 from pymongo.database import Database
 from tavily import TavilyHybridClient
+from tavily.databases.mongodb import MongoDB
 
 db: Database = MongoClient(os.environ["MONGO_URI"])[os.environ["MONGO_DATABASE"]]
 
 hybrid_rag = TavilyHybridClient(
     api_key=os.environ["TAVILY_API_KEY"],
-    db_provider='mongodb',
-    collection=db.get_collection(os.environ["MONGO_COLLECTION"]),
-    index=os.environ["MONGO_INDEX"],
-    embeddings_field='embeddings',
-    content_field='content'
+    database=MongoDB(
+        collection=db.get_collection(os.environ["MONGO_COLLECTION"]),
+        index=os.environ["MONGO_INDEX"],
+        embeddings_field='embeddings',
+        content_field='content',
+    ),
 )
 
 def save_document(document):

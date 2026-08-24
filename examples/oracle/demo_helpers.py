@@ -10,7 +10,7 @@ import oracledb
 from IPython.display import Markdown, display
 
 from tavily import TavilyHybridClient
-from tavily.databases import oracledb as tavily_oracle_db
+from tavily.databases.oracledb import OracleDB, oracledb as tavily_oracle_db
 
 
 def load_local_env():
@@ -329,33 +329,45 @@ def show_persisted_rows(query, title="Persisted Oracle rows"):
 
 
 def make_client(retrieval_mode, **overrides):
-    config = {
-        "api_key": os.environ["TAVILY_API_KEY"],
-        "db_provider": "oracle",
+    oracle_config = {
         "connection": connection,
         "table_name": TABLE_NAME,
         "embeddings_field": EMBEDDINGS_FIELD,
         "content_field": CONTENT_FIELD,
         "cache_timestamp_field": CACHE_TIMESTAMP_FIELD,
-        "embedding_function": demo_embedding_function,
-        "ranking_function": score_ranking_function,
         "retrieval_mode": retrieval_mode,
         "enable_native_hybrid_search": False,
-        "enable_oracle_json_payload": True,
+        "enable_json_payload": True,
         "enable_provenance_metadata": True,
-        "enable_oracle_memory_metadata": True,
+        "enable_memory_metadata": True,
         "cache_ttl_seconds": 3600,
         "cache_score_threshold": -1.0,
         "memory_score_threshold": -1.0,
         "memory_max_results": 5,
         "persistence_depth": "cache_only",
         "dedup_similarity_threshold": None,
-        "oracle_upsert_key": None,
-        "max_persisted_foreign": None,
-        "persist_score_threshold": None,
+        "upsert_key": None,
+        "oracle_max_persisted_foreign": None,
+        "oracle_persist_score_threshold": None,
     }
-    config.update(overrides)
-    return TavilyHybridClient(**config)
+    client_config = {
+        "api_key": os.environ["TAVILY_API_KEY"],
+        "embedding_function": demo_embedding_function,
+        "ranking_function": score_ranking_function,
+    }
+    for key, value in overrides.items():
+        if key == "oracle_upsert_key":
+            oracle_config["upsert_key"] = value
+        elif key == "max_persisted_foreign":
+            oracle_config["oracle_max_persisted_foreign"] = value
+        elif key == "persist_score_threshold":
+            oracle_config["oracle_persist_score_threshold"] = value
+        else:
+            oracle_config[key] = value
+    return TavilyHybridClient(
+        database=OracleDB(**oracle_config),
+        **client_config,
+    )
 
 
 print("Demo helpers are ready. Scores are ranking signals, not probabilities.")

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from tavily import TavilyHybridClient
+from tavily.databases.oracledb import OracleDB
 
 
 README_CHECKPOINTS = [
@@ -260,18 +261,19 @@ def run_oracle_demo(args: argparse.Namespace) -> None:
 
     client = TavilyHybridClient(
         api_key=args.api_key,
-        db_provider="oracle",
-        connection=connection,
-        table_name=args.oracle_table,
-        retrieval_mode=args.oracle_retrieval_mode,
-        cache_timestamp_field=args.oracle_cache_timestamp_field,
-        cache_ttl_seconds=args.cache_ttl_seconds,
-        cache_score_threshold=args.cache_score_threshold,
-        memory_score_threshold=args.memory_score_threshold,
-        memory_max_results=args.memory_max_results,
-        persistence_depth=args.persistence_depth,
-        enable_oracle_memory_metadata=args.enable_oracle_memory_metadata,
-        enable_native_hybrid_search=args.enable_native_hybrid_search,
+        database=OracleDB(
+            connection=connection,
+            table_name=args.oracle_table,
+            retrieval_mode=args.oracle_retrieval_mode,
+            cache_timestamp_field=args.oracle_cache_timestamp_field,
+            cache_ttl_seconds=args.cache_ttl_seconds,
+            cache_score_threshold=args.cache_score_threshold,
+            memory_score_threshold=args.memory_score_threshold,
+            memory_max_results=args.memory_max_results,
+            persistence_depth=args.persistence_depth,
+            enable_memory_metadata=args.enable_oracle_memory_metadata,
+            enable_native_hybrid_search=args.enable_native_hybrid_search,
+        ),
     )
 
     try:

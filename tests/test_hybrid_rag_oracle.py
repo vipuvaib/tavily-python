@@ -1,6 +1,7 @@
 import pytest
 
 from tavily import TavilyHybridClient
+from tavily.databases.oracledb import OracleDB
 from tavily.databases.oracledb import oracledb as oracle_database
 
 
@@ -170,9 +171,7 @@ def test_oracle_search_uses_vector_distance_without_touching_mongodb_collection(
     connection = FakeConnection()
     client = TavilyHybridClient(
         api_key="tvly-test",
-        db_provider="oracle",
-        connection=connection,
-        table_name="tavily_documents",
+        database=OracleDB(connection=connection, table_name="tavily_documents"),
         embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
         ranking_function=lambda _, documents, __: documents,
     )
@@ -286,7 +285,7 @@ def test_oracle_insert_converts_embeddings_to_vector_bind():
         ranking_function=lambda _, documents, __: documents,
     )
 
-    oracle_database.insert_documents(client, [
+    oracle_database.insert_documents(client.database, [
         {
             "content": "foreign content",
             "embeddings": [0.4, 0.5, 0.6],
@@ -392,7 +391,7 @@ def test_oracle_insert_orders_all_lob_binds_last_to_avoid_ora_24816():
         ranking_function=lambda _, documents, __: documents,
     )
 
-    oracle_database.insert_documents(client, [
+    oracle_database.insert_documents(client.database, [
         {
             "content": "foreign content",
             "embeddings": [0.4, 0.5, 0.6],
@@ -453,7 +452,7 @@ def test_oracle_insert_schema_validation_rejects_missing_columns():
     )
 
     with pytest.raises(ValueError, match="missing columns.*EMBEDDINGS"):
-        oracle_database.insert_documents(client, [
+        oracle_database.insert_documents(client.database, [
             {
                 "content": "foreign content",
                 "embeddings": [0.4, 0.5, 0.6],
@@ -480,7 +479,7 @@ def test_oracle_insert_schema_validation_rejects_wrong_vector_column_type():
     )
 
     with pytest.raises(ValueError, match="EMBEDDINGS.*VECTOR-compatible"):
-        oracle_database.insert_documents(client, [
+        oracle_database.insert_documents(client.database, [
             {
                 "content": "foreign content",
                 "embeddings": [0.4, 0.5, 0.6],
@@ -503,7 +502,7 @@ def test_oracle_insert_rolls_back_when_normal_insert_fails():
     )
 
     with pytest.raises(RuntimeError, match="insert failed"):
-        oracle_database.insert_documents(client, [
+        oracle_database.insert_documents(client.database, [
             {
                 "content": "foreign content",
                 "embeddings": [0.4, 0.5, 0.6],
@@ -829,11 +828,12 @@ def test_oracle_save_foreign_respects_persistence_limit_and_score_threshold():
     connection = FakeConnection(rows=[])
     client = TavilyHybridClient(
         api_key="tvly-test",
-        db_provider="oracle",
-        connection=connection,
-        table_name="tavily_documents",
-        max_persisted_foreign=1,
-        persist_score_threshold=0.8,
+        database=OracleDB(
+            connection=connection,
+            table_name="tavily_documents",
+            oracle_max_persisted_foreign=1,
+            oracle_persist_score_threshold=0.8,
+        ),
         embedding_function=lambda texts, _: [[0.7, 0.8, 0.9] for _ in texts],
         ranking_function=lambda _, documents, __: documents,
     )
@@ -925,7 +925,7 @@ def test_oracle_upsert_does_not_null_missing_optional_metadata_columns():
         ranking_function=lambda _, documents, __: documents,
     )
 
-    oracle_database.insert_documents(client, [
+    oracle_database.insert_documents(client.database, [
         {
             "content": "first content",
             "embeddings": [0.1, 0.2, 0.3],
@@ -987,7 +987,7 @@ def test_oracle_cleanup_cache_deletes_expired_cache_only_rows():
         ranking_function=lambda _, documents, __: documents,
     )
 
-    deleted_rows = client.cleanup_cache()
+    deleted_rows = client.database.cleanup_cache()
 
     sql, kwargs = connection.cursor_instance.executed_calls[-1]
     assert deleted_rows == 2
@@ -1024,7 +1024,7 @@ def test_oracle_cleanup_cache_deletes_legacy_cache_mode_rows_without_memory_scop
         ranking_function=lambda _, documents, __: documents,
     )
 
-    deleted_rows = client.cleanup_cache(cache_ttl_seconds=120)
+    deleted_rows = client.database.cleanup_cache(cache_ttl_seconds=120)
 
     sql, kwargs = connection.cursor_instance.executed_calls[-1]
     assert deleted_rows == 1
@@ -1056,7 +1056,7 @@ def test_oracle_cleanup_cache_skips_legacy_rows_without_provenance_scope():
         ranking_function=lambda _, documents, __: documents,
     )
 
-    deleted_rows = client.cleanup_cache(cache_ttl_seconds=120)
+    deleted_rows = client.database.cleanup_cache(cache_ttl_seconds=120)
 
     assert deleted_rows == 0
     assert not any(
@@ -1148,7 +1148,7 @@ def test_oracle_vector_index_helper_creates_index_when_missing():
         ranking_function=lambda _, documents, __: documents,
     )
 
-    created = client.ensure_oracle_vector_index()
+    created = client.database.ensure_vector_index()
 
     assert created is True
     assert connection.committed is True
@@ -1176,7 +1176,7 @@ def test_oracle_vector_index_helper_skips_existing_index():
         ranking_function=lambda _, documents, __: documents,
     )
 
-    created = client.ensure_oracle_vector_index()
+    created = client.database.ensure_vector_index()
 
     assert created is False
     assert connection.committed is False
@@ -1195,7 +1195,7 @@ def test_oracle_text_index_helper_creates_index_when_missing():
         ranking_function=lambda _, documents, __: documents,
     )
 
-    created = client.ensure_oracle_text_index()
+    created = client.database.ensure_text_index()
 
     assert created is True
     assert connection.committed is True
@@ -1221,7 +1221,7 @@ def test_oracle_text_index_helper_skips_existing_index():
         ranking_function=lambda _, documents, __: documents,
     )
 
-    created = client.ensure_oracle_text_index()
+    created = client.database.ensure_text_index()
 
     assert created is False
     assert connection.committed is False

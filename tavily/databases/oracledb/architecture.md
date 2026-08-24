@@ -1,6 +1,6 @@
 # Tavily Hybrid RAG Architecture
 
-This document explains how `TavilyHybridClient` routes a search request across local database memory, Oracle freshness cache, Oracle durable memory, and Tavily Search. It is meant to be read alongside the Oracle guide in `examples/oracle/integration.md`.
+This document explains how `TavilyHybridClient` routes a search request across local database memory, Oracle freshness cache, Oracle durable memory, and Tavily Search. It is meant to be read alongside the Oracle guide in `examples/oracle/integration.md` and the provider-neutral [database adapter architecture](../architecture.md), which records the design changes from the original MongoDB-only Tavily implementation.
 
 ## Mental Model
 
@@ -36,9 +36,9 @@ Returned rows use an origin marker:
 
 | Component | Role | Main implementation |
 | --- | --- | --- |
-| `TavilyHybridClient.search(...)` | Orchestrates query embedding, mode dispatch, Tavily calls, ranking, and persistence. | `tavily/hybrid_rag/hybrid_rag.py` |
-| `retrieval_modes` | Holds Oracle-specific routing for freshness cache and cache-then-memory. | `tavily/hybrid_rag/retrieval_modes.py` |
-| Oracle provider | Executes vector/search hybrid retrieval, freshness filters, metadata filters, inserts, upserts, cleanup, and index helpers. | `tavily/databases/oracledb/oracledb.py` |
+| `TavilyHybridClient.search(...)` | Orchestrates query embedding, Tavily calls, ranking, and persistence from a provider's `RetrievalDecision`. | `tavily/hybrid_rag/hybrid_rag.py` |
+| `OracleDB.retrieve(...)` | Owns Oracle-specific hybrid, freshness-cache, and cache-then-memory routing. | `tavily/databases/oracledb/oracledb.py` |
+| `OracleDB` | Executes vector/search hybrid retrieval, freshness filters, metadata filters, inserts, upserts, cleanup, and index helpers. | `tavily/databases/oracledb/oracledb.py` |
 | Embedding function | Converts query text and saved Tavily content into vectors. Defaults to Cohere helpers unless a custom callable is supplied. | `tavily/hybrid_rag/embeddings.py` |
 | Ranking function | Sorts merged local and foreign candidates in `hybrid_search`. Defaults to Cohere reranking unless a custom callable is supplied. | `tavily/hybrid_rag/embeddings.py` |
 
@@ -63,7 +63,7 @@ Use `hybrid_search` when the response should combine local Oracle memory with fr
 - Tavily being called repeatedly is expected in this mode when `max_foreign > 0`.
 - Set `max_foreign=0` for a local-only retrieval pass.
 - Use `persistence_depth="cache_plus_memory"` when saved Tavily rows should be reusable as durable memory.
-- Use `ensure_oracle_text_index()` before `enable_native_hybrid_search=True` when the Oracle table still needs an Oracle Text index. The provider sanitizes the Oracle Text query and falls back to vector-only search if Oracle Text rejects it.
+- Use `database.ensure_text_index()` before `enable_native_hybrid_search=True` when the Oracle table still needs an Oracle Text index. The provider sanitizes the Oracle Text query and falls back to vector-only search if Oracle Text rejects it.
 
 ## 2. `freshness_cache`
 
@@ -131,10 +131,10 @@ Tavily results
 | --- | --- |
 | `save_foreign` | Enables persistence when set to `True`, or allows a custom transform function. |
 | `persistence_depth` | Writes rows as `cache_only` or `cache_plus_memory` when Oracle memory metadata is enabled, or automatically in cache modes when the table has lifecycle columns. Defaults to `cache_plus_memory` for `cache_then_memory`. |
-| `max_persisted_foreign` | Caps how many Tavily rows are saved per search. |
-| `persist_score_threshold` | Saves only Tavily rows above the configured Tavily score threshold. |
+| `oracle_max_persisted_foreign` | Caps how many Tavily rows are saved per search. |
+| `oracle_persist_score_threshold` | Saves only Tavily rows above the configured Tavily score threshold. |
 | `dedup_similarity_threshold` | Skips near-duplicate Oracle inserts by vector similarity. |
-| `oracle_upsert_key` | Updates existing rows by `source_url` or `content_hash` instead of repeatedly inserting. |
+| `upsert_key` | Updates existing rows by `source_url` or `content_hash` instead of repeatedly inserting. |
 | `auto_cleanup_cache` | Runs expired cache-managed cleanup before searches, rate-limited by `cache_cleanup_interval_seconds`. |
 
 Minimum Oracle storage needs content, embeddings, and a timestamp column. Full cache and memory behavior is easier to inspect when these optional columns exist:
@@ -160,8 +160,8 @@ Minimum Oracle storage needs content, embeddings, and a timestamp column. Full c
 | `cache_score_threshold` | `0.0` | You only want high-confidence cache hits. |
 | `memory_score_threshold` | `0.0` | You only want high-confidence durable memory hits. |
 | `memory_max_results` | `None` | You want the memory tier to inspect a different number of rows than `max_local`. |
-| `enable_oracle_memory_metadata` | `False` | You want lifecycle columns such as `MEMORY_SCOPE`, `EXPIRES_AT`, and `QUERY_COUNT`; `cache_then_memory` enables this internally. |
-| `enable_oracle_json_payload` | `False` | You want raw Tavily payloads stored in Oracle. |
+| `enable_memory_metadata` | `False` | You want lifecycle columns such as `MEMORY_SCOPE`, `EXPIRES_AT`, and `QUERY_COUNT`; `cache_then_memory` enables this internally. |
+| `enable_json_payload` | `False` | You want raw Tavily payloads stored in Oracle. |
 | `enable_provenance_metadata` | `False` | You want reviewable source, query, provider, mode, and cache-hit columns. |
 
 ## Debugging Checklist
@@ -174,16 +174,16 @@ Minimum Oracle storage needs content, embeddings, and a timestamp column. Full c
 | Cache always misses | Check `ADDED_AT`, the TTL window, `cache_score_threshold`, and whether the table has embeddings. |
 | Memory fallback does not hit | Check `persistence_depth="cache_plus_memory"`, memory metadata columns, `memory_score_threshold`, and `memory_max_results`. |
 | Save fails with missing columns | Add the optional metadata columns required by the features you enabled. |
-| Duplicate rows grow too quickly | Configure `oracle_upsert_key`, `dedup_similarity_threshold`, `max_persisted_foreign`, or `persist_score_threshold`. |
+| Duplicate rows grow too quickly | Configure `upsert_key`, `dedup_similarity_threshold`, `oracle_max_persisted_foreign`, or `oracle_persist_score_threshold`. |
 | Non-COSINE distance is rejected | Cache/memory thresholds and semantic deduplication require cosine-style similarity scores; use `vector_index_distance="COSINE"` for those features. |
-| Native Oracle hybrid search silently behaves like vector search | Confirm `ensure_oracle_text_index()` has been called for the configured content column. If Oracle Text rejects a sanitized query, the provider falls back to vector-only search to keep retrieval working. |
+| Native Oracle hybrid search silently behaves like vector search | Confirm `database.ensure_text_index()` has been called for the configured content column. If Oracle Text rejects a sanitized query, the provider falls back to vector-only search to keep retrieval working. |
 
 ## Quick Implementation Map
 
 | Task | Start here |
 | --- | --- |
-| Change mode routing | `tavily/hybrid_rag/retrieval_modes.py` |
-| Change shared search orchestration | `tavily/hybrid_rag/hybrid_rag.py` |
+| Change mode routing | `tavily/databases/oracledb/oracledb.py` (`OracleDB.retrieve`) |
+| Change shared search orchestration | `tavily/hybrid_rag/hybrid_rag.py` and `tavily/databases/base.py` |
 | Change Oracle SQL, filters, inserts, upserts, or cleanup | `tavily/databases/oracledb/oracledb.py` |
 | Change Oracle option defaults or field names | `tavily/databases/oracledb/oracle_config.py` |
 | Run behavior-focused tests | `tests/test_hybrid_rag_oracle.py` |

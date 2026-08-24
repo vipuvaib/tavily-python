@@ -1,3 +1,4 @@
 from . import mongodb
+from .mongodb import MongoDB
 
-__all__ = ["mongodb"]
+__all__ = ["MongoDB", "mongodb"]

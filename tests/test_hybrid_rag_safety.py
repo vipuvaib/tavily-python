@@ -5,6 +5,8 @@ from unittest.mock import sentinel
 import pytest
 
 from tavily import TavilyHybridClient
+from tavily.databases.mongodb import MongoDB
+from tavily.databases.oracledb import OracleDB
 
 
 class FakeMongoCollection:
@@ -55,9 +57,7 @@ def test_save_foreign_skips_empty_insert_after_custom_filter_removes_everything(
     collection = FakeMongoCollection()
     client = TavilyHybridClient(
         api_key="tvly-test",
-        db_provider="mongodb",
-        collection=collection,
-        index="vector_search",
+        database=MongoDB(collection=collection, index="vector_search"),
         embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
         ranking_function=lambda _, documents, __: documents,
     )
@@ -126,6 +126,8 @@ def test_mongodb_ignores_oracle_only_feature_flags_in_hybrid_mode():
         memory_max_results=0,
         cache_cleanup_interval_seconds=0,
         dedup_similarity_threshold=0.95,
+        max_persisted_foreign=0,
+        persist_score_threshold="not-used-by-mongodb",
         embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
         ranking_function=lambda _, documents, __: documents,
     )
@@ -150,38 +152,26 @@ def test_oracle_rejects_invalid_upsert_key():
         )
 
 
-def test_rejects_invalid_persistence_controls():
-    with pytest.raises(ValueError, match="max_persisted_foreign"):
-        TavilyHybridClient(
-            api_key="tvly-test",
-            db_provider="mongodb",
-            collection=FakeMongoCollection(),
-            index="vector_search",
-            max_persisted_foreign=0,
-            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
-            ranking_function=lambda _, documents, __: documents,
+def test_oracle_rejects_invalid_persistence_controls():
+    with pytest.raises(ValueError, match="oracle_max_persisted_foreign"):
+        OracleDB(
+            connection=object(),
+            table_name="tavily_documents",
+            oracle_max_persisted_foreign=0,
         )
 
-    with pytest.raises(ValueError, match="persist_score_threshold"):
-        TavilyHybridClient(
-            api_key="tvly-test",
-            db_provider="mongodb",
-            collection=FakeMongoCollection(),
-            index="vector_search",
-            persist_score_threshold="not-a-number",
-            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
-            ranking_function=lambda _, documents, __: documents,
+    with pytest.raises(ValueError, match="oracle_persist_score_threshold"):
+        OracleDB(
+            connection=object(),
+            table_name="tavily_documents",
+            oracle_persist_score_threshold="not-a-number",
         )
 
-    with pytest.raises(ValueError, match="persist_score_threshold must be finite"):
-        TavilyHybridClient(
-            api_key="tvly-test",
-            db_provider="mongodb",
-            collection=FakeMongoCollection(),
-            index="vector_search",
-            persist_score_threshold="nan",
-            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
-            ranking_function=lambda _, documents, __: documents,
+    with pytest.raises(ValueError, match="oracle_persist_score_threshold must be finite"):
+        OracleDB(
+            connection=object(),
+            table_name="tavily_documents",
+            oracle_persist_score_threshold="nan",
         )
 
     with pytest.raises(ValueError, match="cache_score_threshold must be finite"):
@@ -287,7 +277,7 @@ def test_oracle_convenience_connection_params_create_connection(monkeypatch):
         ranking_function=lambda _, documents, __: documents,
     )
 
-    assert client.connection is created["connection"]
+    assert client.database.connection is created["connection"]
     assert created["kwargs"] == {
         "user": "intern_user",
         "password": sentinel.oracle_credential,

@@ -3,6 +3,15 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
+from math import isfinite
+from time import monotonic
+from typing import Any, Dict, List, Optional, Sequence
+
+from tavily.databases.base import (
+    LocalSearchRequest,
+    PersistenceContext,
+    RetrievalDecision,
+)
 
 from tavily.databases.oracledb.oracle_config import (
     ORACLE_CACHE_HIT_FIELD,
@@ -36,6 +45,16 @@ ORACLE_MEMORY_METADATA_FIELDS = (
 ORACLE_CACHE_RETRIEVAL_MODES = ("freshness_cache", "cache_then_memory")
 
 
+def _finite_float(value, name):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number.") from exc
+    if not isfinite(parsed):
+        raise ValueError(f"{name} must be finite.")
+    return parsed
+
+
 def utc_now():
     return datetime.now(timezone.utc)
 
@@ -46,29 +65,6 @@ def utc_naive_now():
 
 def cache_cutoff_timestamp(cache_ttl_seconds):
     return utc_naive_now() - timedelta(seconds=cache_ttl_seconds)
-
-
-def validate_client(_client):
-    return None
-
-
-def search_provider(client, query_embeddings, max_local, query=None,
-                    cache_ttl_seconds=None, memory_scopes=None):
-    return search(
-        client,
-        query_embeddings,
-        max_local,
-        query=query,
-        cache_ttl_seconds=cache_ttl_seconds,
-        memory_scopes=memory_scopes
-    )
-
-
-def insert_provider(client, documents):
-    documents = filter_duplicate_documents(client, documents)
-    if not documents:
-        return
-    insert_documents(client, documents)
 
 
 def validate_identifier(value, name):
@@ -693,8 +689,8 @@ def build_dedup_scope_filter(client, execute_kwargs):
 
 
 def ensure_vector_index(client, index_name=None):
-    if client.db_provider != "oracle":
-        raise ValueError("ensure_oracle_vector_index is only supported when db_provider='oracle'.")
+    if not isinstance(client, OracleDB):
+        raise ValueError("ensure_vector_index is only supported by OracleDB.")
 
     index_name = index_name or client.vector_index_name
     if index_name is None:
@@ -741,8 +737,8 @@ def ensure_vector_index(client, index_name=None):
 
 
 def ensure_text_index(client, index_name=None):
-    if client.db_provider != "oracle":
-        raise ValueError("ensure_oracle_text_index is only supported when db_provider='oracle'.")
+    if not isinstance(client, OracleDB):
+        raise ValueError("ensure_text_index is only supported by OracleDB.")
 
     table_name = validate_identifier(client.table_name, "table_name")
     content_field = validate_identifier(client.content_field, "content_field")
@@ -978,8 +974,8 @@ def build_unscoped_cache_cleanup_filter(table_columns, execute_kwargs):
 
 
 def delete_expired_cache_rows(client, cache_ttl_seconds=None):
-    if client.db_provider != "oracle":
-        raise ValueError("cleanup_cache is only supported when db_provider='oracle'.")
+    if not isinstance(client, OracleDB):
+        raise ValueError("cleanup_cache is only supported by OracleDB.")
 
     table_columns = fetch_table_columns(client)
     ttl_seconds = client.cache_ttl_seconds if cache_ttl_seconds is None else cache_ttl_seconds
@@ -1066,3 +1062,316 @@ def delete_expired_cache_rows(client, cache_ttl_seconds=None):
 
     client.connection.commit()
     return deleted_rows
+
+
+class OracleDB:
+    """Oracle Vector Search adapter for ``TavilyHybridClient``.
+
+    Oracle-specific connection, schema, caching, memory, index, and
+    persistence configuration lives here. The hybrid client receives this
+    configured object and has no Oracle-specific branches.
+    """
+
+    def __init__(
+            self,
+            connection=None,
+            table_name: Optional[str] = None,
+            embeddings_field: str = "embeddings",
+            content_field: str = "content",
+            retrieval_mode: str = "hybrid_search",
+            cache_ttl_seconds: int = 86400,
+            cache_score_threshold: float = 0.0,
+            cache_timestamp_field: str = "ADDED_AT",
+            persistence_depth: Optional[str] = None,
+            memory_score_threshold: float = 0.0,
+            memory_max_results: Optional[int] = None,
+            enable_memory_metadata: bool = False,
+            enable_native_hybrid_search: bool = False,
+            metadata_filters: Optional[dict] = None,
+            enable_json_payload: bool = False,
+            enable_provenance_metadata: bool = False,
+            vector_index_name: Optional[str] = None,
+            vector_index_type: str = "HNSW",
+            vector_index_distance: str = "COSINE",
+            vector_index_accuracy: int = 90,
+            vector_index_neighbors: int = 40,
+            vector_index_efconstruction: int = 500,
+            vector_index_partitions: int = 10,
+            dedup_similarity_threshold: Optional[float] = None,
+            upsert_key: Optional[str] = None,
+            oracle_max_persisted_foreign: Optional[int] = None,
+            oracle_persist_score_threshold: Optional[float] = None,
+            auto_cleanup_cache: bool = False,
+            cache_cleanup_interval_seconds: int = 3600,
+            text_index_name: Optional[str] = None,
+            user: Optional[str] = None,
+            password: Optional[str] = None,
+            dsn: Optional[str] = None,
+            connection_kwargs: Optional[dict] = None,
+    ):
+        if retrieval_mode not in ("hybrid_search", *ORACLE_CACHE_RETRIEVAL_MODES):
+            raise ValueError(
+                "Supported Oracle retrieval modes are 'hybrid_search', "
+                "'freshness_cache', and 'cache_then_memory'."
+            )
+        if table_name is None:
+            raise ValueError("table_name is required for OracleDB.")
+
+        should_connect = (
+            connection is None
+            and any(value is not None for value in (user, password, dsn))
+        )
+        if connection is None and not should_connect:
+            raise ValueError("connection is required when Oracle credentials are not provided.")
+        if (
+            retrieval_mode in ORACLE_CACHE_RETRIEVAL_MODES
+            or enable_memory_metadata
+        ) and cache_ttl_seconds <= 0:
+            raise ValueError("cache_ttl_seconds must be greater than 0.")
+
+        if retrieval_mode in ORACLE_CACHE_RETRIEVAL_MODES:
+            cache_score_threshold = _finite_float(
+                cache_score_threshold,
+                "cache_score_threshold",
+            )
+        if retrieval_mode == "cache_then_memory":
+            enable_memory_metadata = True
+        if persistence_depth is None:
+            persistence_depth = (
+                "cache_plus_memory"
+                if retrieval_mode == "cache_then_memory"
+                else "cache_only"
+            )
+        if persistence_depth not in ("cache_only", "cache_plus_memory"):
+            raise ValueError(
+                "persistence_depth must be 'cache_only' or 'cache_plus_memory'."
+            )
+
+        memory_score_threshold = _finite_float(
+            memory_score_threshold,
+            "memory_score_threshold",
+        )
+        if memory_max_results is not None and memory_max_results <= 0:
+            raise ValueError("memory_max_results must be greater than 0.")
+        if upsert_key not in (None, "source_url", "content_hash"):
+            raise ValueError(
+                "upsert_key (legacy oracle_upsert_key) must be 'source_url', "
+                "'content_hash', or None."
+            )
+        if (
+            oracle_max_persisted_foreign is not None
+            and oracle_max_persisted_foreign <= 0
+        ):
+            raise ValueError("oracle_max_persisted_foreign must be greater than 0.")
+        if oracle_persist_score_threshold is not None:
+            oracle_persist_score_threshold = _finite_float(
+                oracle_persist_score_threshold,
+                "oracle_persist_score_threshold",
+            )
+        if auto_cleanup_cache and cache_cleanup_interval_seconds <= 0:
+            raise ValueError("cache_cleanup_interval_seconds must be greater than 0.")
+
+        self.connection = connection
+        self._managed_connection = None
+        self.table_name = validate_identifier(table_name, "table_name")
+        self.embeddings_field = validate_identifier(embeddings_field, "embeddings_field")
+        self.content_field = validate_identifier(content_field, "content_field")
+        self.cache_timestamp_field = validate_identifier(
+            cache_timestamp_field,
+            "cache_timestamp_field",
+        )
+        self.retrieval_mode = retrieval_mode
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.cache_score_threshold = cache_score_threshold
+        self.persistence_depth = persistence_depth
+        self.memory_score_threshold = memory_score_threshold
+        self.memory_max_results = memory_max_results
+        self.enable_oracle_memory_metadata = enable_memory_metadata
+        self.enable_native_hybrid_search = enable_native_hybrid_search
+        self.oracle_metadata_filters = metadata_filters or {}
+        self.enable_oracle_json_payload = enable_json_payload
+        self.enable_provenance_metadata = enable_provenance_metadata
+        self.text_index_name = (
+            validate_identifier(text_index_name, "text_index_name")
+            if text_index_name is not None else None
+        )
+        self.vector_index_name = (
+            validate_identifier(vector_index_name, "vector_index_name")
+            if vector_index_name is not None else None
+        )
+        self.vector_index_type = validate_vector_index_type(vector_index_type)
+        self.vector_index_distance = validate_vector_distance(vector_index_distance)
+        self.vector_index_accuracy = vector_index_accuracy
+        self.vector_index_neighbors = vector_index_neighbors
+        self.vector_index_efconstruction = vector_index_efconstruction
+        self.vector_index_partitions = vector_index_partitions
+        self.dedup_similarity_threshold = (
+            _finite_float(dedup_similarity_threshold, "dedup_similarity_threshold")
+            if dedup_similarity_threshold is not None else None
+        )
+        self.oracle_upsert_key = upsert_key
+        self.oracle_max_persisted_foreign = oracle_max_persisted_foreign
+        self.oracle_persist_score_threshold = oracle_persist_score_threshold
+        self.auto_cleanup_cache = auto_cleanup_cache
+        self.cache_cleanup_interval_seconds = cache_cleanup_interval_seconds
+        self._last_cache_cleanup_at = None
+
+        if self.vector_index_distance != "COSINE" and (
+            retrieval_mode in ORACLE_CACHE_RETRIEVAL_MODES
+            or self.dedup_similarity_threshold is not None
+        ):
+            raise ValueError(
+                "Oracle cache/memory thresholds and semantic deduplication "
+                "currently require vector_index_distance='COSINE'."
+            )
+
+        if should_connect:
+            self.connection = self._connect(
+                user,
+                password,
+                dsn,
+                connection_kwargs=connection_kwargs,
+            )
+            self._managed_connection = self.connection
+
+    @staticmethod
+    def _connect(user, password, dsn, connection_kwargs=None):
+        if not user or not password or not dsn:
+            raise ValueError(
+                "user, password, and dsn are required when connection is not provided."
+            )
+        try:
+            import oracledb
+        except ImportError as exc:
+            raise ImportError(
+                "Oracle connection parameters require the 'oracledb' package. "
+                "Install it with the oracle extra or pass an existing connection."
+            ) from exc
+
+        kwargs = {"user": user, "password": password, "dsn": dsn}
+        kwargs.update(connection_kwargs or {})
+        return oracledb.connect(**kwargs)
+
+    def validate(self) -> None:
+        return None
+
+    def retrieve(self, request: LocalSearchRequest) -> RetrievalDecision:
+        self._maybe_cleanup_cache()
+        if self.retrieval_mode == "freshness_cache":
+            cache_results = self._fresh_cache_results(request)
+            if cache_results:
+                return RetrievalDecision.return_local(cache_results[:request.max_results])
+            return RetrievalDecision.fallback_to_foreign()
+
+        if self.retrieval_mode == "cache_then_memory":
+            cache_results = self._fresh_cache_results(request, include_cache_scopes=True)
+            if cache_results:
+                return RetrievalDecision.return_local(cache_results[:request.max_results])
+
+            memory_results = search(
+                self,
+                request.query_embeddings,
+                self.memory_max_results or request.max_local,
+                query=request.query,
+                memory_scopes=("cache_plus_memory",),
+            )
+            memory_hits = [
+                result for result in memory_results
+                if result["score"] >= self.memory_score_threshold
+            ]
+            if memory_hits:
+                return RetrievalDecision.return_local(memory_hits[:request.max_results])
+            return RetrievalDecision.fallback_to_foreign()
+
+        return RetrievalDecision.merge_foreign(search(
+            self,
+            request.query_embeddings,
+            request.max_local,
+            query=request.query,
+        ))
+
+    def _fresh_cache_results(
+            self,
+            request: LocalSearchRequest,
+            include_cache_scopes: bool = False,
+    ) -> List[Dict[str, Any]]:
+        memory_scopes = None
+        if include_cache_scopes and self.enable_oracle_memory_metadata:
+            memory_scopes = ("cache_only", "cache_plus_memory")
+        local_results = search(
+            self,
+            request.query_embeddings,
+            request.max_local,
+            query=request.query,
+            cache_ttl_seconds=self.cache_ttl_seconds,
+            memory_scopes=memory_scopes,
+        )
+        return [
+            result for result in local_results
+            if result["score"] >= self.cache_score_threshold
+        ]
+
+    def build_persistence_document(
+            self,
+            foreign_result: Dict[str, Any],
+            embedding: Sequence[float],
+            context: PersistenceContext,
+    ) -> Dict[str, Any]:
+        document = {
+            self.content_field: foreign_result["content"],
+            self.embeddings_field: embedding,
+        }
+        document.update(build_persistence_metadata(
+            self,
+            foreign_result,
+            context.query,
+            context.cache_hit,
+        ))
+        return document
+
+    def select_foreign_results_for_persistence(
+            self,
+            foreign_results: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        candidates = []
+        for result in foreign_results:
+            if self.oracle_persist_score_threshold is not None:
+                score = result.get("score")
+                if score is None or score < self.oracle_persist_score_threshold:
+                    continue
+            candidates.append(result)
+
+        if self.oracle_max_persisted_foreign is not None:
+            return candidates[:self.oracle_max_persisted_foreign]
+        return candidates
+
+    def persist(self, documents: List[Dict[str, Any]]) -> None:
+        documents = filter_duplicate_documents(self, documents)
+        if documents:
+            insert_documents(self, documents)
+
+    def cleanup_cache(self, cache_ttl_seconds=None):
+        return delete_expired_cache_rows(self, cache_ttl_seconds=cache_ttl_seconds)
+
+    def ensure_vector_index(self, index_name=None):
+        return ensure_vector_index(self, index_name=index_name)
+
+    def ensure_text_index(self, index_name=None):
+        return ensure_text_index(self, index_name=index_name)
+
+    def _maybe_cleanup_cache(self) -> None:
+        if not self.auto_cleanup_cache:
+            return
+        now = monotonic()
+        if (
+            self._last_cache_cleanup_at is not None
+            and now - self._last_cache_cleanup_at < self.cache_cleanup_interval_seconds
+        ):
+            return
+        self.cleanup_cache()
+        self._last_cache_cleanup_at = now
+
+    def close(self) -> None:
+        if self._managed_connection is not None:
+            self._managed_connection.close()
+            self._managed_connection = None

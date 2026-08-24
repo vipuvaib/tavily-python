@@ -1,6 +1,6 @@
 # OracleDB Provider for Tavily Hybrid RAG
 
-This provider adds Oracle-backed vector retrieval, freshness caching, and long-term memory behavior to `TavilyHybridClient`.
+This provider adds Oracle-backed vector retrieval, freshness caching, and long-term memory behavior to `TavilyHybridClient`. Configure an `OracleDB` instance, then pass it as the client's `database`; Oracle options do not belong on the shared client.
 
 The high-level pattern is:
 
@@ -33,7 +33,7 @@ Persistence is controlled by `persistence_depth`.
 
 When omitted, `persistence_depth` defaults to `cache_plus_memory` for `cache_then_memory` and `cache_only` for the other modes.
 
-When `enable_oracle_memory_metadata=True`, the provider writes these lifecycle columns. `cache_then_memory` enables this internally because the mode needs `MEMORY_SCOPE` to distinguish fresh cache from durable memory.
+When `enable_memory_metadata=True`, the provider writes these lifecycle columns. `cache_then_memory` enables this internally because the mode needs `MEMORY_SCOPE` to distinguish fresh cache from durable memory.
 
 | Column | Purpose |
 | --- | --- |
@@ -94,23 +94,29 @@ If you pass a different `vector_index_distance`, Oracle local hybrid search uses
 
 ## Native Oracle Text Hybrid Search
 
-`enable_native_hybrid_search=True` combines Oracle Vector Search with Oracle Text scoring. It requires an Oracle Text index on the content column, which can be created or verified through the SDK helper:
+`enable_native_hybrid_search=True` combines Oracle Vector Search with Oracle Text scoring. It requires an Oracle Text index on the content column, which can be created or verified through the adapter helper:
 
 ```python
+import os
+
+from tavily import TavilyHybridClient
+from tavily.databases.oracledb import OracleDB
+
 client = TavilyHybridClient(
     api_key=os.environ["TAVILY_API_KEY"],
-    db_provider="oracle",
-    connection=connection,
-    table_name="TAVILY_DOCUMENTS",
-    text_index_name="TAVILY_DOCS_TEXT_IDX",
-    enable_native_hybrid_search=True,
+    database=OracleDB(
+        connection=connection,
+        table_name="TAVILY_DOCUMENTS",
+        text_index_name="TAVILY_DOCS_TEXT_IDX",
+        enable_native_hybrid_search=True,
+    ),
 )
 
-created = client.ensure_oracle_text_index()
+created = client.database.ensure_text_index()
 print("Created text index:", created)
 ```
 
-`ensure_oracle_text_index()` returns `True` when it creates the index and `False` when the configured index already exists. If `text_index_name` is omitted, the helper uses `{TABLE_NAME}_{CONTENT_FIELD}_TEXT_IDX`.
+`ensure_text_index()` returns `True` when it creates the index and `False` when the configured index already exists. If `text_index_name` is omitted, the helper uses `{TABLE_NAME}_{CONTENT_FIELD}_TEXT_IDX`.
 
 When native hybrid search is enabled, the provider sanitizes the text query before passing it into Oracle Text. If Oracle Text still rejects the query at runtime, the provider falls back to vector-only Oracle search instead of failing the whole request. The demo notebooks keep `enable_native_hybrid_search=False` by default because vector-only local search is simpler to run in every environment.
 
@@ -120,17 +126,17 @@ The provider includes several controls to prevent the table from growing too qui
 
 | Option | Purpose |
 | --- | --- |
-| `max_persisted_foreign` | Caps how many Tavily results are written per search. |
-| `persist_score_threshold` | Persists only Tavily results above a score threshold. |
+| `oracle_max_persisted_foreign` | Caps how many Tavily results are written per search. |
+| `oracle_persist_score_threshold` | Persists only Tavily results above a score threshold. |
 | `dedup_similarity_threshold` | Skips near-duplicate inserts using vector similarity. |
-| `oracle_upsert_key` | Updates existing rows by `source_url` or `content_hash` instead of repeatedly inserting. |
+| `upsert_key` | Updates existing rows by `source_url` or `content_hash` instead of repeatedly inserting. |
 | `cache_ttl_seconds` | Controls the fresh-cache time window. |
 | `cleanup_cache()` | Deletes expired cache-managed rows without deleting durable memory rows. |
 | `auto_cleanup_cache=True` | Runs cleanup before search, rate-limited by `cache_cleanup_interval_seconds`. |
 
 ## JSON and Provenance
 
-When `enable_oracle_json_payload=True`, the provider can store the raw Tavily result payload in `RAW_PAYLOAD`.
+When `enable_json_payload=True`, the provider can store the raw Tavily result payload in `RAW_PAYLOAD`.
 
 When `enable_provenance_metadata=True`, it can also fill reviewable columns such as `SOURCE_URL`, `SOURCE_TITLE`, `RETRIEVAL_QUERY`, `RETRIEVAL_TIMESTAMP`, `RETRIEVAL_MODE`, `CACHE_HIT`, `INSERTED_FROM`, and `PROVIDER_NAME`.
 
@@ -162,7 +168,8 @@ Oracle-specific implementation files:
 Shared Hybrid RAG orchestration lives in:
 
 - `tavily/hybrid_rag/hybrid_rag.py`
-- `tavily/hybrid_rag/retrieval_modes.py`
 - `tavily/hybrid_rag/embeddings.py`
 
+`OracleDB.retrieve()` owns Oracle's hybrid, freshness-cache, and
+cache-then-memory routing through a provider-neutral `RetrievalDecision`.
 MongoDB remains a separate provider and is not coupled to the Oracle implementation.

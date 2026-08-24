@@ -278,8 +278,8 @@ The default embedding and reranking helpers use Cohere, so install a provider ex
 
 | Provider | Best for | Connection pattern |
 | --- | --- | --- |
-| MongoDB | Existing MongoDB Atlas/local vector-search workflows | Create a `MongoClient`, choose a collection, and pass the collection into `TavilyHybridClient`. |
-| OracleDB | Oracle-backed vector search, freshness cache, and memory workflows | Create an `oracledb` connection, choose a table, and pass the connection into `TavilyHybridClient`. |
+| MongoDB | Existing MongoDB Atlas/local vector-search workflows | Configure `MongoDB`, then pass it as `database`. |
+| OracleDB | Oracle-backed vector search, freshness cache, and memory workflows | Configure `OracleDB`, then pass it as `database`. |
 
 MongoDB example:
 
@@ -288,15 +288,17 @@ import os
 
 from pymongo import MongoClient
 from tavily import TavilyHybridClient
+from tavily.databases.mongodb import MongoDB
 
 mongo = MongoClient(os.environ["MONGO_URI"])
 collection = mongo[os.environ["MONGO_DATABASE"]][os.environ["MONGO_COLLECTION"]]
 
 client = TavilyHybridClient(
     api_key=os.environ["TAVILY_API_KEY"],
-    db_provider="mongodb",
-    collection=collection,
-    index=os.environ["MONGO_INDEX"],
+    database=MongoDB(
+        collection=collection,
+        index=os.environ["MONGO_INDEX"],
+    ),
 )
 ```
 
@@ -307,6 +309,7 @@ import os
 
 import oracledb
 from tavily import TavilyHybridClient
+from tavily.databases.oracledb import OracleDB
 
 connection = oracledb.connect(
     user=os.environ["ORACLE_USER"],
@@ -316,15 +319,17 @@ connection = oracledb.connect(
 
 client = TavilyHybridClient(
     api_key=os.environ["TAVILY_API_KEY"],
-    db_provider="oracle",
-    connection=connection,
-    table_name="TAVILY_DOCUMENTS",
-    retrieval_mode="hybrid_search",
+    database=OracleDB(
+        connection=connection,
+        table_name="TAVILY_DOCUMENTS",
+        retrieval_mode="hybrid_search",
+    ),
 )
 ```
 
 Provider-specific details live with the provider implementation:
 
+- Architecture decisions, the MongoDB-compatibility boundary, and guidance for adding another provider: [tavily/databases/architecture.md](tavily/databases/architecture.md)
 - OracleDB architecture, schema, cache/memory behavior, scoring notes, and notebook guide: [tavily/databases/oracledb/README.md](tavily/databases/oracledb/README.md)
 - Runnable Oracle examples: [examples/oracle](examples/oracle)
 - General deployment notes: [DEPLOYMENT.md](DEPLOYMENT.md)

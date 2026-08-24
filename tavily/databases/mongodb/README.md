@@ -6,7 +6,7 @@ MongoDB acts as the local vector store. Tavily supplies fresh external results, 
 
 ## Retrieval Flow
 
-MongoDB currently supports `retrieval_mode="hybrid_search"`.
+The `MongoDB` adapter always uses hybrid-search behavior.
 
 ```text
 User query
@@ -29,17 +29,19 @@ import os
 
 from pymongo import MongoClient
 from tavily import TavilyHybridClient
+from tavily.databases.mongodb import MongoDB
 
 mongo = MongoClient(os.environ["MONGO_URI"])
 collection = mongo[os.environ["MONGO_DATABASE"]][os.environ["MONGO_COLLECTION"]]
 
 client = TavilyHybridClient(
     api_key=os.environ["TAVILY_API_KEY"],
-    db_provider="mongodb",
-    collection=collection,
-    index=os.environ["MONGO_INDEX"],
-    embeddings_field="embeddings",
-    content_field="content",
+    database=MongoDB(
+        collection=collection,
+        index=os.environ["MONGO_INDEX"],
+        embeddings_field="embeddings",
+        content_field="content",
+    ),
 )
 ```
 
@@ -49,18 +51,20 @@ Or use the convenience connection parameters:
 import os
 
 from tavily import TavilyHybridClient
+from tavily.databases.mongodb import MongoDB
 
 client = TavilyHybridClient(
     api_key=os.environ["TAVILY_API_KEY"],
-    db_provider="mongodb",
-    mongo_uri=os.environ["MONGO_URI"],
-    mongo_database=os.environ["MONGO_DATABASE"],
-    mongo_collection=os.environ["MONGO_COLLECTION"],
-    index=os.environ["MONGO_INDEX"],
+    database=MongoDB(
+        uri=os.environ["MONGO_URI"],
+        database_name=os.environ["MONGO_DATABASE"],
+        collection_name=os.environ["MONGO_COLLECTION"],
+        index=os.environ["MONGO_INDEX"],
+    ),
 )
 ```
 
-When the SDK creates the MongoDB client through `mongo_uri`, `client.close()` closes that managed client.
+When `MongoDB` creates the MongoDB client through `uri`, `client.close()` closes that managed client.
 
 ## Expected Collection Shape
 
