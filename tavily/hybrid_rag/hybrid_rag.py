@@ -1,14 +1,16 @@
 import os
-from typing import Union, Optional, Literal
+from typing import Callable, List, Optional, Union
 
 import requests
 from tavily import TavilyClient
 from tavily.databases import _resolve_constructor_arguments, _UNSET
 from tavily.databases.base import (
-    Database,
+    HybridRAGBackend,
+    LocalSearchResult,
     LocalSearchRequest,
     PersistenceContext,
-    RetrievalAction
+    RetrievalAction,
+    TavilyResult,
 )
 
 try:
@@ -38,9 +40,9 @@ class TavilyHybridClient():
     def __init__(
             self,
             api_key: Union[str, None],
-            database: Optional[Union[str, Database]] = None,
+            database: Optional[Union[str, HybridRAGBackend]] = None, # str for Legacy API
             *args,
-            embedding_function: Optional[callable] = _UNSET,
+            embedding_function: Optional[callable] = _UNSET, # Sentinel objects to distinguish when user explicitly passes None
             ranking_function: Optional[callable] = _UNSET,
             session: Optional[requests.Session] = _UNSET,
             **legacy_database_options
@@ -111,8 +113,10 @@ class TavilyHybridClient():
             self.close()
             raise
 
-    def search(self, query, max_results=10, max_local=None, max_foreign=None,
-               save_foreign=False, **kwargs):
+    def search(self, query: str, max_results: int = 10,
+               max_local: Optional[int] = None,
+               max_foreign: Optional[int] = None,
+               save_foreign=False, **kwargs) -> List[LocalSearchResult]:
         """Return local and Tavily results according to the database decision."""
         if max_local is None:
             max_local = max_results
@@ -147,13 +151,17 @@ class TavilyHybridClient():
         self._save_foreign_results(foreign_results, save_foreign, max_foreign, query)
         return results
 
-    def _search_tavily(self, query, max_foreign, **kwargs):
+    def _search_tavily(
+            self, query: str, max_foreign: int, **kwargs
+    ) -> List[TavilyResult]:
         if max_foreign > 0:
             return self.tavily.search(query, max_results=max_foreign, **kwargs)["results"]
         return []
 
     @staticmethod
-    def _project_foreign_results(foreign_results):
+    def _project_foreign_results(
+            foreign_results: List[TavilyResult],
+    ) -> List[LocalSearchResult]:
         return [
             {
                 "content": result["content"],
@@ -163,8 +171,14 @@ class TavilyHybridClient():
             for result in foreign_results
         ]
 
-    def _save_foreign_results(self, foreign_results, save_foreign, max_foreign,
-                              query=None, cache_hit=False):
+    def _save_foreign_results(
+            self,
+            foreign_results: List[TavilyResult],
+            save_foreign,
+            max_foreign: int,
+            query: Optional[str] = None,
+            cache_hit: bool = False,
+    ) -> None:
         # ``save_foreign`` may be a transform callable, so do not use truthiness.
         if not (max_foreign > 0 and save_foreign != False):
             return

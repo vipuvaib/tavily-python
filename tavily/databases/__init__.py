@@ -1,4 +1,13 @@
-from tavily.databases.base import Database, RetrievalAction, RetrievalDecision
+from tavily.databases.base import (
+    Database,
+    DatabaseAdapter,
+    HybridRAGBackend,
+    LocalSearchResult,
+    PersistenceDocument,
+    RetrievalAction,
+    RetrievalDecision,
+    TavilyResult,
+)
 from tavily.databases.mongodb.mongodb import MongoDB
 from tavily.databases.oracledb.oracledb import OracleDB
 from tavily.databases.legacy_handling import (
@@ -8,10 +17,15 @@ from tavily.databases.legacy_handling import (
 
 __all__ = [
     "Database",
+    "DatabaseAdapter",
+    "HybridRAGBackend",
+    "LocalSearchResult",
     "MongoDB",
     "OracleDB",
+    "PersistenceDocument",
     "RetrievalAction",
     "RetrievalDecision",
+    "TavilyResult",
     "_UNSET",
     "_resolve_constructor_arguments",
 ]

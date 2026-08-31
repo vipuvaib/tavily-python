@@ -1,9 +1,11 @@
-from typing import Any, Dict, List, Optional, Sequence
+from typing import List, Optional, Sequence
 
 from tavily.databases.base import (
     LocalSearchRequest,
     PersistenceContext,
+    PersistenceDocument,
     RetrievalDecision,
+    TavilyResult,
 )
 
 
@@ -37,10 +39,10 @@ class MongoDB:
 
     def build_persistence_document(
             self,
-            foreign_result: Dict[str, Any],
+            foreign_result: TavilyResult,
             embedding: Sequence[float],
             _context: PersistenceContext,
-    ) -> Dict[str, Any]:
+    ) -> PersistenceDocument:
         return {
             self.content_field: foreign_result["content"],
             self.embeddings_field: embedding,
@@ -48,12 +50,12 @@ class MongoDB:
 
     def select_foreign_results_for_persistence(
             self,
-            foreign_results: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+            foreign_results: List[TavilyResult],
+    ) -> List[TavilyResult]:
         """MongoDB persists every Tavily result selected by the caller."""
         return foreign_results
 
-    def persist(self, documents: List[Dict[str, Any]]) -> None:
+    def persist(self, documents: List[PersistenceDocument]) -> None:
         insert_documents(self.collection, documents)
 
     def close(self) -> None:

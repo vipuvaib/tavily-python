@@ -1,6 +1,11 @@
 from tavily.databases.mongodb.mongodb import MongoDB
 from tavily.databases.base import Database
 
+# These tuples describe historical positional constructor contracts.
+# In case, TavilyHybridClient API changes in future, the new parameters 
+# should be keyword-only and should not be added here unless 
+# positional compatibility is intentionally required.
+
 _LEGACY_POSITIONAL_ARGS = (
     "collection",
     "index",
@@ -25,8 +30,7 @@ _LEGACY_DATABASE_OPTIONS = {
     "content_field"
 }
 
-def _parse_positional_args(args, *, api_name):
-    # assert(api_name == "legacy" or api_name == "new", "'api_name' can be either 'legacy' or 'new'")
+def _bind_positional_args(args, *, api_name):
     names = _LEGACY_POSITIONAL_ARGS if api_name == "legacy" else _NEW_POSITIONAL_ARGS
 
     if len(args) > len(names):
@@ -45,9 +49,10 @@ _UNSET = object() # For handling cases, when user passes this in new API
 #   api_key,
 #   database,
 #   embed_fn,
-#   embedding_function=None, 
+#   embedding_function=None,
 #)
 # With default of None, we can't distinguish it from omission
+
 def _resolve_constructor_arguments(
     database,
     args,
@@ -76,7 +81,7 @@ def _resolve_constructor_arguments(
                 "TavilyHybridClient() got multiple values for argument 'db_provider'"
             )
         
-        legacy_args = _parse_positional_args(
+        legacy_args = _bind_positional_args(
             args,
             api_name="legacy",
         )
@@ -119,7 +124,7 @@ def _resolve_constructor_arguments(
         })
 
     elif isinstance(database, Database):
-        new_args = _parse_positional_args(
+        new_args = _bind_positional_args(
             args,
             api_name="new",
         )

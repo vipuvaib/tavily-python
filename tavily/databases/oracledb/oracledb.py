@@ -10,7 +10,9 @@ from typing import Any, Dict, List, Optional, Sequence
 from tavily.databases.base import (
     LocalSearchRequest,
     PersistenceContext,
+    PersistenceDocument,
     RetrievalDecision,
+    TavilyResult,
 )
 
 from tavily.databases.oracledb.oracle_config import (
@@ -1313,10 +1315,10 @@ class OracleDB:
 
     def build_persistence_document(
             self,
-            foreign_result: Dict[str, Any],
+            foreign_result: TavilyResult,
             embedding: Sequence[float],
             context: PersistenceContext,
-    ) -> Dict[str, Any]:
+    ) -> PersistenceDocument:
         document = {
             self.content_field: foreign_result["content"],
             self.embeddings_field: embedding,
@@ -1331,8 +1333,8 @@ class OracleDB:
 
     def select_foreign_results_for_persistence(
             self,
-            foreign_results: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+            foreign_results: List[TavilyResult],
+    ) -> List[TavilyResult]:
         candidates = []
         for result in foreign_results:
             if self.oracle_persist_score_threshold is not None:
@@ -1345,7 +1347,7 @@ class OracleDB:
             return candidates[:self.oracle_max_persisted_foreign]
         return candidates
 
-    def persist(self, documents: List[Dict[str, Any]]) -> None:
+    def persist(self, documents: List[PersistenceDocument]) -> None:
         documents = filter_duplicate_documents(self, documents)
         if documents:
             insert_documents(self, documents)

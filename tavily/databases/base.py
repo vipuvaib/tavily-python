@@ -1,15 +1,10 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Dict, List, Literal, Optional, Protocol, Sequence, TypedDict, runtime_checkable
 
-"""
-TODO: We can maybe add a small fake-provider contract test that is independent of MongoDB and Oracle. It should cover 
-local-only results, merging Tavily results, fallback to Tavily, persistence, validation, and cleanup. This will show that 
-the abstraction actually works for future providers.
-"""
 
 class RetrievalAction(str, Enum):
-    """How the hybrid client should handle a provider's local results."""
+    """How a backend's retrieval policy handles Tavily results."""
 
     RETURN_LOCAL = "return_local"
     MERGE_FOREIGN = "merge_foreign"
@@ -26,6 +21,28 @@ class LocalSearchRequest:
     max_local: int
 
 
+class TavilyResult(TypedDict):
+    """Required fields from a Tavily result used by Hybrid RAG.
+
+    Tavily responses may include additional fields such as ``url`` and
+    ``title``. Providers can retain and persist those fields as needed.
+    """
+
+    content: str
+    score: float
+
+
+class LocalSearchResult(TypedDict):
+    """Provider-neutral result shape returned to the hybrid client."""
+
+    content: str
+    score: float
+    origin: Literal["local", "foreign"]
+
+
+PersistenceDocument = Dict[str, Any]
+
+
 @dataclass(frozen=True)
 class PersistenceContext:
     """Context attached to Tavily results before a provider persists them."""
@@ -33,42 +50,46 @@ class PersistenceContext:
     query: Optional[str] = None
     cache_hit: bool = False
 
-"""
-TODO: The provider contract relies heavily on Dict[str, Any], which makes the expected result and persistence shapes unclear. 
-It would help to define typed structures, or at least document and test those shapes before the interface becomes public.
-"""
+
 @dataclass
 class RetrievalDecision:
-    """A provider's retrieval result and the next orchestration action.
+    """A backend's local result and its hybrid-search routing decision.
 
-    Providers use this value to own local retrieval policy without making the
-    hybrid client aware of provider-specific modes such as Oracle's cache and
-    durable-memory tiers.
+    The backend owns local retrieval and decides whether the shared client
+    should return local results, merge them with Tavily, or fall back to
+    Tavily. This lets database-specific policies such as Oracle cache and
+    durable-memory routing remain outside ``TavilyHybridClient``.
     """
 
     action: RetrievalAction
-    local_results: List[Dict[str, Any]] = field(default_factory=list)
+    local_results: List[LocalSearchResult] = field(default_factory=list)
 
     @classmethod
-    def return_local(cls, results: List[Dict[str, Any]]) -> "RetrievalDecision":
+    def return_local(
+            cls, results: List[LocalSearchResult]
+    ) -> "RetrievalDecision":
         return cls(RetrievalAction.RETURN_LOCAL, results)
 
     @classmethod
-    def merge_foreign(cls, results: List[Dict[str, Any]]) -> "RetrievalDecision":
+    def merge_foreign(
+            cls, results: List[LocalSearchResult]
+    ) -> "RetrievalDecision":
         return cls(RetrievalAction.MERGE_FOREIGN, results)
 
     @classmethod
     def fallback_to_foreign(cls) -> "RetrievalDecision":
         return cls(RetrievalAction.FALLBACK_TO_FOREIGN)
 
-"""
-TODO: The database adapter currently decides whether Tavily should be called and whether its results should be merged or 
-used as a fallback. That is more than database retrieval—it is hybrid-search policy. We should either make that 
-responsibility explicit in the interface or keep the routing decision in the hybrid client.
-"""
+    
 @runtime_checkable
-class Database(Protocol):
-    """Configured local-store adapter used by :class:`TavilyHybridClient`."""
+class HybridRAGBackend(Protocol):
+    """Configured local store and hybrid-search policy for ``TavilyHybridClient``.
+
+    A backend owns its database operations and decides whether a local lookup
+    should return immediately, merge with Tavily, or fall back to Tavily. It
+    must return ``LocalSearchResult`` dictionaries from ``retrieve()`` and
+    receives ``TavilyResult`` dictionaries when persisting foreign results.
+    """
 
     def validate(self) -> None:
         ...
@@ -78,20 +99,48 @@ class Database(Protocol):
 
     def build_persistence_document(
             self,
-            foreign_result: Dict[str, Any],
+            foreign_result: TavilyResult,
             embedding: Sequence[float],
             context: PersistenceContext,
-    ) -> Dict[str, Any]:
+    ) -> PersistenceDocument:
         ...
 
     def select_foreign_results_for_persistence(
             self,
-            foreign_results: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+            foreign_results: List[TavilyResult],
+    ) -> List[TavilyResult]:
         ...
 
-    def persist(self, documents: List[Dict[str, Any]]) -> None:
+    def persist(self, documents: List[PersistenceDocument]) -> None:
         ...
 
     def close(self) -> None:
         ...
+
+
+class DatabaseAdapter:
+    """Optional base class for straightforward Hybrid RAG backends.
+
+    Subclasses only need to implement ``retrieve()``,
+    ``build_persistence_document()``, and ``persist()`` for the usual
+    merge-based flow. They can override these defaults when they need custom
+    validation, foreign-result selection, or resource cleanup.
+    """
+
+    def validate(self) -> None:
+        return None
+
+    def select_foreign_results_for_persistence(
+            self,
+            foreign_results: List[TavilyResult],
+    ) -> List[TavilyResult]:
+        return foreign_results
+
+    def close(self) -> None:
+        return None
+
+
+# ``Database`` remains the compatibility name used by the initial adapter API.
+# New provider implementations should use ``HybridRAGBackend`` in annotations
+# or subclass ``DatabaseAdapter`` for the default lifecycle behavior.
+Database = HybridRAGBackend
