@@ -751,7 +751,6 @@ def test_oracle_cache_then_memory_memory_hit_skips_tavily_after_cache_miss():
         cache_ttl_seconds=300,
         cache_score_threshold=0.8,
         memory_score_threshold=0.6,
-        memory_max_results=3,
         embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
         ranking_function=failing_ranking_function,
     )
@@ -772,13 +771,56 @@ def test_oracle_cache_then_memory_memory_hit_skips_tavily_after_cache_miss():
     assert "MEMORY_SCOPE IN (:memory_scope_0, :memory_scope_1)" in cache_sql
     assert cache_kwargs["memory_scope_0"] == "cache_only"
     assert cache_kwargs["memory_scope_1"] == "cache_plus_memory"
-    assert "FETCH FIRST 3 ROWS ONLY" in memory_sql
+    assert "FETCH FIRST 1 ROWS ONLY" in memory_sql
     assert "MEMORY_SCOPE IN (:memory_scope_0)" in memory_sql
     assert memory_kwargs["memory_scope_0"] == "cache_plus_memory"
     assert connection.cursor_instance.executemany_call is None
     assert results == [
         {"content": "durable memory content", "score": 0.72, "origin": "local"}
     ]
+
+
+def test_oracle_max_local_zero_falls_back_to_foreign_in_all_modes_after_cleanup():
+    for retrieval_mode in (
+        "hybrid_search",
+        "freshness_cache",
+        "cache_then_memory",
+    ):
+        connection = FakeConnection()
+        client = create_oracle_client(
+            api_key="tvly-test",
+            connection=connection,
+            table_name="tavily_documents",
+            retrieval_mode=retrieval_mode,
+            auto_cleanup_cache=True,
+            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
+            ranking_function=failing_ranking_function,
+        )
+        client.tavily = FakeTavilyClient()
+
+        results = client.search(
+            "test query",
+            max_results=1,
+            max_local=0,
+            max_foreign=1,
+        )
+
+        executed_sql = [
+            sql for sql, _kwargs in connection.cursor_instance.executed_calls
+        ]
+        assert results == [
+            {
+                "content": "foreign oracle content",
+                "score": 0.91,
+                "origin": "foreign",
+            }
+        ]
+        assert len(client.tavily.calls) == 1
+        assert any("DELETE FROM TAVILY_DOCUMENTS" in sql for sql in executed_sql)
+        assert not any(
+            "VECTOR_DISTANCE" in sql or "CONTAINS(" in sql
+            for sql in executed_sql
+        )
 
 
 def test_oracle_cache_then_memory_miss_calls_tavily_and_saves_memory_metadata():

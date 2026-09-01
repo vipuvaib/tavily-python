@@ -1086,7 +1086,6 @@ class OracleDB:
             cache_timestamp_field: str = "ADDED_AT",
             persistence_depth: Optional[str] = None,
             memory_score_threshold: float = 0.0,
-            memory_max_results: Optional[int] = None,
             enable_memory_metadata: bool = False,
             enable_native_hybrid_search: bool = False,
             metadata_filters: Optional[dict] = None,
@@ -1153,8 +1152,7 @@ class OracleDB:
             memory_score_threshold,
             "memory_score_threshold",
         )
-        if memory_max_results is not None and memory_max_results <= 0:
-            raise ValueError("memory_max_results must be greater than 0.")
+
         if upsert_key not in (None, "source_url", "content_hash"):
             raise ValueError(
                 "upsert_key (legacy oracle_upsert_key) must be 'source_url', "
@@ -1187,7 +1185,6 @@ class OracleDB:
         self.cache_score_threshold = cache_score_threshold
         self.persistence_depth = persistence_depth
         self.memory_score_threshold = memory_score_threshold
-        self.memory_max_results = memory_max_results
         self.enable_oracle_memory_metadata = enable_memory_metadata
         self.enable_native_hybrid_search = enable_native_hybrid_search
         self.oracle_metadata_filters = metadata_filters or {}
@@ -1259,6 +1256,10 @@ class OracleDB:
 
     def retrieve(self, request: LocalSearchRequest) -> RetrievalDecision:
         self._maybe_cleanup_cache()
+
+        if request.max_local < 1:
+            return RetrievalDecision.fallback_to_foreign()
+
         if self.retrieval_mode == "freshness_cache":
             cache_results = self._fresh_cache_results(request)
             if cache_results:
@@ -1273,7 +1274,7 @@ class OracleDB:
             memory_results = search(
                 self,
                 request.query_embeddings,
-                self.memory_max_results or request.max_local,
+                request.max_local,
                 query=request.query,
                 memory_scopes=("cache_plus_memory",),
             )
