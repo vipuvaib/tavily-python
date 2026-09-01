@@ -1,3 +1,5 @@
+# Copyright (c) 2026, Oracle and/or its affiliates.
+
 from tavily.databases.mongodb.mongodb import MongoDB
 from tavily.databases.base import Database
 

@@ -1,3 +1,5 @@
+# Copyright (c) 2026, Oracle and/or its affiliates.
+
 """Provider-neutral contract tests for the Hybrid RAG backend interface."""
 
 import pytest

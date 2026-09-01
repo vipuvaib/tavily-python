@@ -1,3 +1,5 @@
+# Copyright (c) 2026, Oracle and/or its affiliates.
+
 import sys
 import types
 from unittest.mock import sentinel

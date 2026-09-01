@@ -1,3 +1,5 @@
+# Copyright (c) 2026, Oracle and/or its affiliates.
+
 import array
 from datetime import datetime, timedelta, timezone
 import hashlib
