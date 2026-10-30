@@ -802,12 +802,21 @@ def validate_vector_distance(value):
     return value
 
 
-def insert_documents(client, documents):
+def insert_documents(client, documents, deduplicate=False):
     if not documents:
         return
 
     normalized_documents, column_names = normalize_documents(client, documents)
     validate_insert_schema(client, normalized_documents)
+
+    # Validate the entire batch before deduplication can discard any documents.
+    if deduplicate:
+        normalized_documents = filter_duplicate_documents(client, normalized_documents)
+        if not normalized_documents:
+            return
+        column_names = {
+            column for document in normalized_documents for column in document
+        }
 
     if client.oracle_upsert_key is not None:
         upsert_documents(client, normalized_documents, column_names)
@@ -816,15 +825,64 @@ def insert_documents(client, documents):
     insert_normalized_documents(client, normalized_documents, column_names)
 
 
+def persistence_scope(client):
+    """Normalize configured filters without losing case-aliased constraints."""
+    scope = {}
+    for key, value in client.oracle_metadata_filters.items():
+        column = validate_identifier(key, "oracle_metadata_filters key")
+        if column in scope:
+            raise ValueError(
+                f"Oracle persistence scope contains duplicate column {column}."
+            )
+        scope[column] = value
+    return scope
+
+
+def apply_persistence_scope(document, scope):
+    """Fill fixed ownership values and reject documents outside the write scope."""
+    for column, constraint in scope.items():
+        if isinstance(constraint, (list, tuple, set)):
+            if not constraint:
+                raise ValueError(
+                    f"Oracle persistence scope for {column} has no permitted values."
+                )
+            if column not in document:
+                raise ValueError(
+                    f"Oracle persistence scope requires an explicit value for {column}."
+                )
+            value = document[column]
+            # IN predicates do not match NULL. Oracle also treats "" as NULL.
+            permitted = value is not None and value != "" and value in constraint
+        else:
+            value = document.get(column, constraint)
+            permitted = value == constraint and constraint != ""
+
+        if not permitted:
+            raise ValueError(
+                f"Document column {column} is outside the Oracle persistence scope."
+            )
+        document[column] = value
+
+
 def normalize_documents(client, documents):
     normalized_documents = []
     column_names = set()
+    scope = persistence_scope(client)
 
     for document in documents:
-        normalized_document = {
-            validate_identifier(key, "document key"): value
-            for key, value in document.items()
-        }
+        normalized_document = {}
+        for key, value in document.items():
+            column = validate_identifier(key, "document key")
+            if (
+                column in scope
+                and column in normalized_document
+                and normalized_document[column] != value
+            ):
+                raise ValueError(
+                    f"Conflicting values for Oracle persistence scope column {column}."
+                )
+            normalized_document[column] = value
+        apply_persistence_scope(normalized_document, scope)
 
         if client.content_field not in normalized_document or client.embeddings_field not in normalized_document:
             raise ValueError(
@@ -866,6 +924,7 @@ def insert_normalized_documents(client, normalized_documents, column_names, comm
 
 def upsert_documents(client, normalized_documents, column_names):
     key_column = upsert_key_column(client.oracle_upsert_key)
+    scope_columns = set(persistence_scope(client))
     upsertable_documents = [
         document for document in normalized_documents
         if document.get(key_column)
@@ -897,7 +956,7 @@ def upsert_documents(client, normalized_documents, column_names):
                 )
                 update_columns = [
                     column for column in ordered_columns
-                    if column != key_column
+                    if column != key_column and column not in scope_columns
                 ]
                 update_assignments = [
                     build_upsert_update_assignment(column)
@@ -905,12 +964,22 @@ def upsert_documents(client, normalized_documents, column_names):
                 ]
                 insert_columns = ", ".join(ordered_columns)
                 insert_values = ", ".join(f":{column}" for column in ordered_columns)
+                match_conditions = [f"target.{key_column} = source.{key_column}"]
+                for column in sorted(scope_columns - {key_column}):
+                    if document[column] is None:
+                        match_conditions.append(f"target.{column} IS NULL")
+                    else:
+                        match_conditions.append(f"target.{column} = :{column}")
+                update_clause = (
+                    f"WHEN MATCHED THEN UPDATE SET {', '.join(update_assignments)}"
+                    if update_assignments else ""
+                )
 
                 sql = f"""
                     MERGE INTO {client.table_name} target
                     USING (SELECT :{key_column} AS {key_column} FROM DUAL) source
-                    ON (target.{key_column} = source.{key_column})
-                    WHEN MATCHED THEN UPDATE SET {', '.join(update_assignments)}
+                    ON ({' AND '.join(match_conditions)})
+                    {update_clause}
                     WHEN NOT MATCHED THEN INSERT ({insert_columns})
                     VALUES ({insert_values})
                 """
@@ -1021,9 +1090,8 @@ def delete_expired_cache_rows(client, cache_ttl_seconds=None):
             )
             """
 
-        sql = f"""
-            DELETE FROM {client.table_name}
-            WHERE (
+        cleanup_condition = f"""
+            (
                 {ORACLE_MEMORY_SCOPE_FIELD} = :memory_scope
                 AND (
                     {ORACLE_EXPIRES_AT_FIELD} < :current_timestamp
@@ -1038,9 +1106,8 @@ def delete_expired_cache_rows(client, cache_ttl_seconds=None):
         execute_kwargs["memory_scope"] = "cache_only"
         execute_kwargs["current_timestamp"] = utc_now()
     elif ORACLE_MEMORY_SCOPE_FIELD in table_columns and has_cache_timestamp:
-        sql = f"""
-            DELETE FROM {client.table_name}
-            WHERE {ORACLE_MEMORY_SCOPE_FIELD} = :memory_scope
+        cleanup_condition = f"""
+            {ORACLE_MEMORY_SCOPE_FIELD} = :memory_scope
               AND {client.cache_timestamp_field} < :cache_cutoff_timestamp
         """
         execute_kwargs["memory_scope"] = "cache_only"
@@ -1052,13 +1119,20 @@ def delete_expired_cache_rows(client, cache_ttl_seconds=None):
         if not unscoped_filter:
             return 0
 
-        sql = f"""
-            DELETE FROM {client.table_name}
-            WHERE {client.cache_timestamp_field} < :cache_cutoff_timestamp
+        cleanup_condition = f"""
+            {client.cache_timestamp_field} < :cache_cutoff_timestamp
               AND ({unscoped_filter})
         """
     else:
         return 0
+
+    metadata_filter = build_metadata_filter(client.oracle_metadata_filters, execute_kwargs)
+    # Scope the entire cleanup condition, including every lifecycle/legacy OR.
+    sql = f"""
+        DELETE FROM {client.table_name}
+        WHERE ({cleanup_condition})
+          {metadata_filter}
+    """
 
     with client.connection.cursor() as cursor:
         cursor.execute(sql, **execute_kwargs)
@@ -1074,6 +1148,11 @@ class OracleDB:
     Oracle-specific connection, schema, caching, memory, index, and
     persistence configuration lives here. The hybrid client receives this
     configured object and has no Oracle-specific branches.
+
+    metadata_filters also bounds persistence: missing scalar values are filled,
+    collection filters require explicit permitted values, and conflicting
+    documents are rejected before the batch is written. Upserts match the key
+    plus the document's exact scope values and never update scope columns.
     """
 
     def __init__(
@@ -1351,9 +1430,7 @@ class OracleDB:
         return candidates
 
     def persist(self, documents: List[PersistenceDocument]) -> None:
-        documents = filter_duplicate_documents(self, documents)
-        if documents:
-            insert_documents(self, documents)
+        insert_documents(self, documents, deduplicate=True)
 
     def cleanup_cache(self, cache_ttl_seconds=None):
         return delete_expired_cache_rows(self, cache_ttl_seconds=cache_ttl_seconds)

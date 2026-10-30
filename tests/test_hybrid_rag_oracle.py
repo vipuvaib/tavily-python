@@ -1,5 +1,8 @@
 # Copyright (c) 2026, Oracle and/or its affiliates.
 
+from datetime import datetime, timezone
+import sqlite3
+
 import pytest
 
 from tavily import TavilyHybridClient
@@ -1130,13 +1133,125 @@ def test_oracle_cleanup_cache_skips_legacy_rows_without_provenance_scope():
     assert connection.committed is False
 
 
-def test_oracle_auto_cleanup_runs_before_search_once_per_interval():
+@pytest.mark.parametrize(
+    "missing_columns",
+    [
+        pytest.param(set(), id="lifecycle"),
+        pytest.param({"ADDED_AT"}, id="lifecycle-without-timestamp"),
+        pytest.param({"EXPIRES_AT"}, id="memory-scope-and-timestamp"),
+        pytest.param({"MEMORY_SCOPE"}, id="legacy-with-expiration-column"),
+        pytest.param({"MEMORY_SCOPE", "EXPIRES_AT"}, id="legacy-timestamp"),
+    ],
+)
+@pytest.mark.parametrize(
+    "metadata_filters, owned_tenants, owned_regions",
+    [
+        pytest.param({"TENANT_ID": "A"}, {"A"}, {"east", "west"}, id="equality"),
+        pytest.param({"TENANT_ID": None}, {None}, {"east", "west"}, id="null"),
+        pytest.param(
+            {"TENANT_ID": ["A", "C"]}, {"A", "C"}, {"east", "west"}, id="list"
+        ),
+        pytest.param({"TENANT_ID": []}, set(), {"east", "west"}, id="empty-list"),
+        pytest.param(
+            {"TENANT_ID": "A", "REGION": "east"}, {"A"}, {"east"}, id="compound"
+        ),
+        pytest.param(
+            {}, {"A", "B", "C", None}, {"east", "west"}, id="unfiltered"
+        ),
+    ],
+)
+def test_oracle_cleanup_cache_preserves_rows_outside_metadata_scope(
+        monkeypatch, missing_columns, metadata_filters, owned_tenants, owned_regions
+):
+    monkeypatch.setattr(
+        oracle_database, "utc_now",
+        lambda: datetime(2026, 10, 28, tzinfo=timezone.utc),
+    )
+    schema_rows = [
+        row for row in DEFAULT_SCHEMA_ROWS if row[0] not in missing_columns
+    ] + [("TENANT_ID", "VARCHAR2"), ("REGION", "VARCHAR2")]
+    connection = FakeConnection(schema_rows=schema_rows)
+    database = OracleDB(
+        connection=connection,
+        table_name="tavily_documents",
+        metadata_filters=metadata_filters,
+    )
+
+    database.cleanup_cache()
+
+    sql, kwargs = connection.cursor_instance.executed_calls[-1]
+    # Execute the actual DELETE predicate to catch ownership filters that only
+    # constrain one side of the lifecycle/legacy OR.
+    columns = [column for column, _ in schema_rows]
+    past = "2026-10-20T00:00:00+00:00"
+    future = "2026-11-01T00:00:00+00:00"
+    row_kinds = [
+        ("expired_cache", "cache_only", past, past, "freshness_cache", "tavily"),
+        ("expired_legacy", None, past, past, "freshness_cache", "tavily"),
+        ("expired_legacy_timestamp", None, None, past, "freshness_cache", "tavily"),
+        ("fresh_cache", "cache_only", future, future, "freshness_cache", "tavily"),
+        ("durable_memory", "cache_plus_memory", past, past, "hybrid_search", "tavily"),
+        ("unrelated_legacy", None, past, past, "freshness_cache", "other"),
+    ]
+    expected_remaining = set()
+    with sqlite3.connect(":memory:") as rows:
+        rows.execute(
+            "CREATE TABLE TAVILY_DOCUMENTS (ROW_ID INTEGER PRIMARY KEY, "
+            + ", ".join(column + " TEXT" for column in columns) + ")"
+        )
+        row_id = 0
+        for tenant in ("A", "B", "C", None):
+            for region in ("east", "west"):
+                for kind, scope, expires_at, added_at, mode, provider in row_kinds:
+                    row_id += 1
+                    document = {
+                        "TENANT_ID": tenant,
+                        "REGION": region,
+                        "MEMORY_SCOPE": scope,
+                        "EXPIRES_AT": expires_at,
+                        "ADDED_AT": added_at,
+                        "RETRIEVAL_MODE": mode,
+                        "PROVIDER_NAME": provider,
+                        "INSERTED_FROM": provider,
+                    }
+                    rows.execute(
+                        "INSERT INTO TAVILY_DOCUMENTS (ROW_ID, "
+                        + ", ".join(columns) + ") VALUES ("
+                        + ", ".join("?" for _ in range(len(columns) + 1)) + ")",
+                        [row_id] + [document.get(column) for column in columns],
+                    )
+                    eligible = kind in {"expired_cache", "expired_legacy"}
+                    if kind == "expired_legacy_timestamp":
+                        eligible = "ADDED_AT" not in missing_columns
+                    if "MEMORY_SCOPE" not in missing_columns and "EXPIRES_AT" in missing_columns:
+                        # This schema only cleans explicitly scoped cache rows.
+                        eligible = kind == "expired_cache"
+                    in_scope = tenant in owned_tenants and region in owned_regions
+                    if not (eligible and in_scope):
+                        expected_remaining.add(row_id)
+
+        bindings = {
+            key: value.isoformat() if isinstance(value, datetime) else value
+            for key, value in kwargs.items()
+        }
+        rows.execute(sql, bindings)
+        remaining = {
+            row[0] for row in rows.execute("SELECT ROW_ID FROM TAVILY_DOCUMENTS")
+        }
+
+    assert remaining == expected_remaining
+    assert connection.committed is True
+
+
+@pytest.mark.parametrize("metadata_filters", [{}, {"TENANT_ID": "A"}])
+def test_oracle_auto_cleanup_runs_before_search_once_per_interval(metadata_filters):
     connection = FakeConnection(rowcount=2)
     client = create_oracle_client(
         api_key="tvly-test",
         connection=connection,
         table_name="tavily_documents",
         auto_cleanup_cache=True,
+        oracle_metadata_filters=metadata_filters,
         cache_cleanup_interval_seconds=3600,
         embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
         ranking_function=lambda _, documents, __: documents,
@@ -1157,6 +1272,10 @@ def test_oracle_auto_cleanup_runs_before_search_once_per_interval():
     assert len(delete_calls) == 1
     assert len(vector_search_calls) == 2
     assert delete_calls[0][1]["memory_scope"] == "cache_only"
+
+    if metadata_filters:
+        assert "TENANT_ID = :metadata_filter_0" in delete_calls[0][0]
+        assert delete_calls[0][1]["metadata_filter_0"] == "A"
 
 
 def test_oracle_save_foreign_inserts_tavily_results():
