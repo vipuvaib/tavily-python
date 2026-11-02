@@ -97,7 +97,7 @@ def validate_index(database):
         
         if not field_exists:
             raise ValueError(f"Field '{database.embeddings_field}' does not exist in "
-                                "index '{database.index}'.")
+                                f"index '{database.index}'.")
         
         index_exists = True
         

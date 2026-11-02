@@ -4,8 +4,8 @@ from tavily.databases.mongodb.mongodb import MongoDB
 from tavily.databases.base import Database
 
 # These tuples describe historical positional constructor contracts.
-# In case, TavilyHybridClient API changes in future, the new parameters 
-# should be keyword-only and should not be added here unless 
+# If the TavilyHybridClient API changes in the future, new parameters
+# should be keyword-only and should not be added here unless
 # positional compatibility is intentionally required.
 
 _LEGACY_POSITIONAL_ARGS = (
@@ -46,14 +46,16 @@ def _bind_positional_args(args, *, api_name):
     return dict(zip(names, args))
 
 
-_UNSET = object() # For handling cases, when user passes this in new API
+# Handle cases where a user supplies both positional and keyword arguments
+# in the new API.
+_UNSET = object()
 # TavilyHybridClient(
 #   api_key,
 #   database,
 #   embed_fn,
 #   embedding_function=None,
 #)
-# With default of None, we can't distinguish it from omission
+# With a default of None, explicit None is indistinguishable from omission.
 
 def _resolve_constructor_arguments(
     database,
@@ -219,7 +221,7 @@ def create_legacy_database(options):
         )
     elif provider == "oracledb":
         raise ValueError(
-            "Only MongoDB can be created via legacy API"
+            "Only MongoDB can be created via the legacy API"
         )
 
     raise ValueError(

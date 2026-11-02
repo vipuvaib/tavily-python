@@ -736,7 +736,7 @@ def test_resolve_rejects_positional_args_when_database_is_none():
 def test_resolve_rejects_legacy_oracle_provider_positional():
     with pytest.raises(
         ValueError,
-        match="Only MongoDB can be created via legacy API",
+        match="Only MongoDB can be created via the legacy API",
     ):
         resolve(
             database="oracledb",
@@ -745,7 +745,7 @@ def test_resolve_rejects_legacy_oracle_provider_positional():
 def test_resolve_rejects_legacy_oracle_provider_keyword():
     with pytest.raises(
         ValueError,
-        match="Only MongoDB can be created via legacy API",
+        match="Only MongoDB can be created via the legacy API",
     ):
         resolve(
             legacy_options={

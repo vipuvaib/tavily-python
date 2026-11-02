@@ -1,5 +1,7 @@
 # Copyright (c) 2026, Oracle and/or its affiliates.
 
+import array
+from datetime import datetime, timedelta, timezone
 import json
 import math
 import sqlite3
@@ -8,6 +10,7 @@ import pytest
 
 from tavily import TavilyHybridClient
 from tavily.databases.oracledb import OracleDB
+from tavily.databases.oracledb import oracledb as oracle_database
 from tests.test_hybrid_rag_oracle import FakeConnection, FakeCursor, FakeTavilyClient
 
 
@@ -30,7 +33,8 @@ def cosine_distance(left, right, metric):
 
 def sqlite_bindings(bindings):
     return {
-        key: json.dumps(list(value)) if key in {"EMBEDDINGS", "query_vector"} else value
+        key: json.dumps(list(value)) if isinstance(value, array.array)
+        else value.isoformat(" ") if isinstance(value, datetime) else value
         for key, value in bindings.items()
     }
 
@@ -38,10 +42,10 @@ def sqlite_bindings(bindings):
 class StoredRowsCursor(FakeCursor):
     """Execute emitted insert and dedup predicates against nullable stored rows."""
 
-    def __init__(self, marker_columns):
+    def __init__(self, marker_columns, extra_columns=()):
         schema_rows = [
             ("CONTENT", "CLOB"), ("EMBEDDINGS", "VECTOR"), ("TENANT_ID", "VARCHAR2")
-        ] + [(column, "VARCHAR2") for column in marker_columns]
+        ] + list(extra_columns) + [(column, "VARCHAR2") for column in marker_columns]
         super().__init__(rows=[], schema_rows=schema_rows)
         self.store = sqlite3.connect(":memory:")
         self.store.row_factory = sqlite3.Row
@@ -57,7 +61,7 @@ class StoredRowsCursor(FakeCursor):
             # Adapt Oracle syntax, preserving the actual WHERE predicates.
             sql = sql.replace(", COSINE)", ", 'COSINE')").replace(
                 "FETCH FIRST 1 ROWS ONLY", "LIMIT 1"
-            )
+            ).replace("FROM DUAL", "")
             self.active_rows = self.store.execute(sql, sqlite_bindings(kwargs)).fetchall()
 
     def executemany(self, sql, rows):
@@ -69,9 +73,9 @@ class StoredRowsCursor(FakeCursor):
 
 
 class StoredRowsConnection(FakeConnection):
-    def __init__(self, marker_columns):
+    def __init__(self, marker_columns, extra_columns=()):
         super().__init__()
-        self.cursor_instance = StoredRowsCursor(marker_columns)
+        self.cursor_instance = StoredRowsCursor(marker_columns, extra_columns)
 
     def commit(self):
         self.cursor_instance.store.commit()
@@ -86,8 +90,8 @@ class StoredRowsConnection(FakeConnection):
 def connection_factory():
     connections = []
 
-    def create(marker_columns):
-        connection = StoredRowsConnection(marker_columns)
+    def create(marker_columns, extra_columns=()):
+        connection = StoredRowsConnection(marker_columns, extra_columns)
         connections.append(connection)
         return connection
 
@@ -210,3 +214,274 @@ def test_keyed_upserts_still_bypass_semantic_dedup_without_provenance(upsert_key
     # Keyed rows must also remain visible to later unkeyed deduplication.
     assert bindings["PROVIDER_NAME"] == "tavily"
     assert bindings["INSERTED_FROM"] == "tavily"
+
+
+@pytest.mark.parametrize("filters, existing_owner, existing_region, owner, region", [
+    pytest.param(
+        {"tenant_id": ["A", "B"]}, "B", "east", "A", "east",
+        id="list-and-case-normalization",
+    ),
+    pytest.param(
+        {"TENANT_ID": ("A", "B")}, "A", "east", "B", "east",
+        id="tuple",
+    ),
+    pytest.param(
+        {"TENANT_ID": {"A", "B"}}, "B", "east", "A", "east",
+        id="set",
+    ),
+    pytest.param(
+        {"TENANT_ID": ["A", "B"], "REGION": ["east", "west"]},
+        "B", "east", "A", "east", id="compound-different-tenant",
+    ),
+    pytest.param(
+        {"TENANT_ID": ["A", "B"], "REGION": ["east", "west"]},
+        "A", "west", "A", "east", id="compound-different-region",
+    ),
+    pytest.param(
+        {"TENANT_ID": None, "region": ["east", "west"]},
+        None, "west", None, "east", id="null-owner-and-region-list",
+    ),
+    pytest.param(
+        {"TENANT_ID": "A", "REGION": ["east", "west"]},
+        "A", "west", "A", "east", id="scalar-owner-and-region-list",
+    ),
+    pytest.param(
+        {"tenant_id": None}, "A", "east", None, "east",
+        id="null-owner",
+    ),
+])
+@pytest.mark.parametrize("upsert_key", [None, "source_url", "content_hash"])
+def test_semantic_dedup_matches_exact_document_scope(
+        connection_factory, filters, existing_owner, existing_region,
+        owner, region, upsert_key):
+    connection = connection_factory(ORIGIN_COLUMNS, [("REGION", "VARCHAR2")])
+    database = OracleDB(
+        connection=connection,
+        table_name="tavily_documents",
+        metadata_filters=filters,
+        dedup_similarity_threshold=0.95,
+        upsert_key=upsert_key,
+    )
+    store = connection.cursor_instance.store
+    store.execute(
+        "INSERT INTO TAVILY_DOCUMENTS "
+        "(CONTENT, EMBEDDINGS, TENANT_ID, REGION, PROVIDER_NAME, INSERTED_FROM) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("same content", json.dumps([0.1, 0.2, 0.3]), existing_owner,
+         existing_region, "tavily", "tavily"),
+    )
+    candidate = {
+        "content": "same content", "embeddings": [0.1, 0.2, 0.3],
+        "tenant_id": owner, "region": region,
+        "provider_name": "tavily", "inserted_from": "tavily",
+    }
+
+    database.persist([candidate])
+    database.persist([candidate])
+
+    stored = list(store.execute("SELECT TENANT_ID, REGION FROM TAVILY_DOCUMENTS"))
+    assert len(stored) == 2
+    assert sum(
+        row["TENANT_ID"] == owner and row["REGION"] == region for row in stored
+    ) == 1
+    assert set(candidate) == {
+        "content", "embeddings", "tenant_id", "region", "provider_name", "inserted_from"
+    }
+
+
+def test_semantic_dedup_without_configured_scope_remains_global(connection_factory):
+    connection = connection_factory(ORIGIN_COLUMNS)
+    database = OracleDB(
+        connection=connection, table_name="tavily_documents",
+        dedup_similarity_threshold=0.95,
+    )
+    store = connection.cursor_instance.store
+    store.execute(
+        "INSERT INTO TAVILY_DOCUMENTS "
+        "(CONTENT, EMBEDDINGS, TENANT_ID, PROVIDER_NAME, INSERTED_FROM) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("same content", json.dumps([0.1, 0.2, 0.3]), "B", "tavily", "tavily"),
+    )
+
+    database.persist([{
+        "content": "same content", "embeddings": [0.1, 0.2, 0.3],
+        "tenant_id": "A", "provider_name": "tavily", "inserted_from": "tavily",
+    }])
+
+    assert list(store.execute("SELECT TENANT_ID FROM TAVILY_DOCUMENTS"))[0][0] == "B"
+    assert store.execute("SELECT COUNT(*) FROM TAVILY_DOCUMENTS").fetchone()[0] == 1
+
+
+def batch_document(content, embedding=None, **fields):
+    return {
+        "content": content,
+        "embeddings": [1.0, 0.0, 0.0] if embedding is None else embedding,
+        "provider_name": "tavily", "inserted_from": "tavily",
+        **fields,
+    }
+
+
+@pytest.mark.parametrize("marker_columns", MARKER_SCHEMAS)
+@pytest.mark.parametrize("upsert_key", [None, "source_url", "content_hash"])
+@pytest.mark.parametrize("second_vector", [[1.0, 0.0, 0.0], [0.99, 0.01, 0.0]],
+                         ids=["identical", "near-identical"])
+def test_batch_dedup_keeps_first_similar_candidate(
+        connection_factory, marker_columns, upsert_key, second_vector):
+    connection = connection_factory(marker_columns)
+    database = OracleDB(
+        connection=connection, table_name="tavily_documents",
+        metadata_filters={"TENANT_ID": "A"},
+        dedup_similarity_threshold=0.95, upsert_key=upsert_key,
+    )
+    documents = [
+        batch_document("first"),
+        batch_document("similar", second_vector),
+        batch_document("different", [0.0, 1.0, 0.0]),
+    ]
+    for document in documents:
+        for column in set(ORIGIN_COLUMNS) - set(marker_columns):
+            document.pop(column.lower())
+
+    database.persist(documents)
+
+    stored = list(connection.cursor_instance.store.execute(
+        "SELECT CONTENT FROM TAVILY_DOCUMENTS ORDER BY rowid"
+    ))
+    assert [row[0] for row in stored] == ["first", "different"]
+
+
+def test_batch_dedup_disabled_keeps_similar_candidates(connection_factory):
+    connection = connection_factory(ORIGIN_COLUMNS)
+    database = OracleDB(connection=connection, table_name="tavily_documents")
+
+    database.persist([batch_document("first"), batch_document("second")])
+
+    assert connection.cursor_instance.store.execute(
+        "SELECT COUNT(*) FROM TAVILY_DOCUMENTS"
+    ).fetchone()[0] == 2
+    assert not any(
+        "VECTOR_DISTANCE" in sql
+        for sql, _ in connection.cursor_instance.executed_calls
+    )
+
+
+def test_batch_dedup_compares_only_previously_accepted_candidates(connection_factory):
+    connection = connection_factory(ORIGIN_COLUMNS)
+    database = OracleDB(
+        connection=connection, table_name="tavily_documents",
+        dedup_similarity_threshold=0.9,
+    )
+    database.persist([
+        batch_document("zero-degrees"),
+        batch_document("twenty-degrees", [0.9396926, 0.3420201, 0.0]),
+        batch_document("forty-degrees", [0.7660444, 0.6427876, 0.0]),
+    ])
+
+    assert [row[0] for row in connection.cursor_instance.store.execute(
+        "SELECT CONTENT FROM TAVILY_DOCUMENTS ORDER BY rowid"
+    )] == ["zero-degrees", "forty-degrees"]
+
+
+@pytest.mark.parametrize("filters, owners", [
+    ({"TENANT_ID": ["A", "B"], "REGION": ["east", "west"]},
+     [("A", "east"), ("B", "east"), ("A", "west")]),
+    ({"TENANT_ID": None, "REGION": ["east", "west"]},
+     [(None, "east"), (None, "west")]),
+])
+def test_batch_dedup_preserves_exact_owner_scope(connection_factory, filters, owners):
+    connection = connection_factory(ORIGIN_COLUMNS, [("REGION", "VARCHAR2")])
+    database = OracleDB(
+        connection=connection, table_name="tavily_documents",
+        metadata_filters=filters, dedup_similarity_threshold=0.95,
+    )
+    documents = [
+        batch_document(f"{tenant}-{region}-{copy}", tenant_id=tenant, region=region)
+        for tenant, region in owners for copy in range(2)
+    ]
+
+    database.persist(documents)
+
+    stored = connection.cursor_instance.store.execute(
+        "SELECT TENANT_ID, REGION, COUNT(*) AS N FROM TAVILY_DOCUMENTS "
+        "GROUP BY TENANT_ID, REGION"
+    ).fetchall()
+    assert {(row["TENANT_ID"], row["REGION"]) for row in stored} == set(owners)
+    assert all(row["N"] == 1 for row in stored)
+
+
+@pytest.mark.parametrize("reference_fields, expected_rows", [
+    ({"provider_name": "other"}, 2),
+    ({"inserted_from": "other"}, 2),
+    ({"provider_name": None}, 2),
+    ({"inserted_from": None}, 2),
+    ({"memory_scope": "cache_only", "expires_at": -1}, 2),
+    ({"memory_scope": "cache_only", "expires_at": 0}, 2),
+    ({"memory_scope": "cache_only", "expires_at": 1}, 1),
+    ({"memory_scope": "cache_plus_memory", "expires_at": -1}, 1),
+    ({"memory_scope": None, "expires_at": None}, 1),
+])
+def test_batch_dedup_respects_reference_origin_and_expiration(
+        connection_factory, monkeypatch, reference_fields, expected_rows):
+    now = datetime(2026, 11, 2, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(oracle_database, "utc_now", lambda: now)
+    connection = connection_factory(
+        ORIGIN_COLUMNS, [("MEMORY_SCOPE", "VARCHAR2"), ("EXPIRES_AT", "TIMESTAMP")]
+    )
+    database = OracleDB(
+        connection=connection, table_name="tavily_documents",
+        metadata_filters={"TENANT_ID": "A"}, dedup_similarity_threshold=0.95,
+    )
+    fields = dict(reference_fields)
+    if isinstance(fields.get("expires_at"), int):
+        fields["expires_at"] = now + timedelta(days=fields["expires_at"])
+
+    database.persist([
+        batch_document("first", **fields),
+        batch_document("second"),
+    ])
+
+    assert connection.cursor_instance.store.execute(
+        "SELECT COUNT(*) FROM TAVILY_DOCUMENTS"
+    ).fetchone()[0] == expected_rows
+
+
+@pytest.mark.parametrize("upsert_key", ["source_url", "content_hash"])
+def test_batch_keyed_upserts_still_bypass_semantic_dedup(upsert_key):
+    connection = FakeConnection()
+    database = OracleDB(
+        connection=connection, table_name="tavily_documents",
+        dedup_similarity_threshold=0.95, upsert_key=upsert_key,
+    )
+
+    database.persist([
+        batch_document("first", **{upsert_key: "key-one"}),
+        batch_document("second", **{upsert_key: "key-two"}),
+    ])
+
+    calls = connection.cursor_instance.executed_calls
+    assert sum("MERGE INTO" in sql for sql, _ in calls) == 2
+    assert not any("VECTOR_DISTANCE" in sql for sql, _ in calls)
+
+
+def test_batch_dedup_preserves_insert_rollback(connection_factory):
+    connection = connection_factory(ORIGIN_COLUMNS)
+    store = connection.cursor_instance.store
+    store.execute(
+        "CREATE TRIGGER reject_invalid BEFORE INSERT ON TAVILY_DOCUMENTS "
+        "WHEN NEW.CONTENT = 'invalid' BEGIN "
+        "SELECT RAISE(ABORT, 'rejected test row'); END"
+    )
+    database = OracleDB(
+        connection=connection, table_name="tavily_documents",
+        dedup_similarity_threshold=0.95,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="rejected test row"):
+        database.persist([
+            batch_document("first"),
+            batch_document("duplicate"),
+            batch_document("invalid", [0.0, 1.0, 0.0]),
+        ])
+
+    assert store.execute("SELECT COUNT(*) FROM TAVILY_DOCUMENTS").fetchone()[0] == 0
+    assert connection.committed is False

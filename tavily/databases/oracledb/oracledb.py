@@ -632,7 +632,8 @@ def filter_duplicate_documents(client, documents):
             continue
 
         embedding = get_document_value(document, client.embeddings_field)
-        if embedding is None or not is_duplicate(client, embedding):
+        if embedding is None or not is_duplicate(
+                client, embedding, document, unique_documents):
             unique_documents.append(document)
     return unique_documents
 
@@ -644,29 +645,63 @@ def get_document_value(document, column_name):
     return None
 
 
-def is_duplicate(client, embedding):
+def is_duplicate(client, embedding, document, pending_documents=()):
     vector_distance = vector_distance_expression(client)
     execute_kwargs = {"query_vector": to_vector(embedding)}
-    metadata_filter = build_metadata_filter(client.oracle_metadata_filters, execute_kwargs)
+    # Normalization has already validated the candidate against the write scope.
+    # Match its exact values so another permitted owner cannot suppress the write.
+    document_scope = {
+        column: document[column] for column in persistence_scope(client)
+    }
+    metadata_filter = build_metadata_filter(document_scope, execute_kwargs)
     dedup_filter = build_dedup_scope_filter(client, execute_kwargs)
-    sql = f"""
-            SELECT 1 - {vector_distance} AS score
-            FROM {client.table_name}
-            WHERE {client.embeddings_field} IS NOT NULL
-              {metadata_filter}
-              {dedup_filter}
-            ORDER BY {vector_distance}
-            FETCH FIRST 1 ROWS ONLY
-        """
-
     with client.connection.cursor() as cursor:
-        cursor.execute(sql, **execute_kwargs)
-        row = cursor.fetchone()
+        for source, bindings in deduplication_sources(
+                client, pending_documents, execute_kwargs):
+            sql = f"""
+                SELECT 1 - {vector_distance} AS score
+                FROM {source}
+                WHERE {client.embeddings_field} IS NOT NULL
+                  {metadata_filter}
+                  {dedup_filter}
+                ORDER BY {vector_distance}
+                FETCH FIRST 1 ROWS ONLY
+            """
+            cursor.execute(sql, **bindings)
+            row = cursor.fetchone()
+            if row is not None and row[0] >= client.dedup_similarity_threshold:
+                return True
 
-    if row is None:
-        return False
+    return False
 
-    return row[0] >= client.dedup_similarity_threshold
+
+def deduplication_sources(client, pending_documents, execute_kwargs):
+    """Apply the same Oracle similarity and eligibility checks to pending rows."""
+    yield client.table_name, execute_kwargs
+    if not pending_documents:
+        return
+
+    columns = set(persistence_scope(client)) | {client.embeddings_field}
+    table_columns = fetch_table_columns(client)
+    columns.update(
+        column for column in (ORACLE_PROVIDER_NAME_FIELD, ORACLE_INSERTED_FROM_FIELD)
+        if column in table_columns
+    )
+    if (
+        ORACLE_MEMORY_SCOPE_FIELD in table_columns
+        and ORACLE_EXPIRES_AT_FIELD in table_columns
+    ):
+        columns.update((ORACLE_MEMORY_SCOPE_FIELD, ORACLE_EXPIRES_AT_FIELD))
+
+    for document in pending_documents:
+        bindings = dict(execute_kwargs)
+        projections = []
+        for index, column in enumerate(sorted(columns)):
+            bind_name = f"dedup_pending_{index}"
+            projections.append(f":{bind_name} AS {column}")
+            bindings[bind_name] = document.get(column)
+        source = "(SELECT " + ", ".join(projections) + " FROM DUAL)"
+        yield source, bindings
 
 
 def build_dedup_scope_filter(client, execute_kwargs):
@@ -1162,6 +1197,8 @@ class OracleDB:
     collection filters require explicit permitted values, and conflicting
     documents are rejected before the batch is written. Upserts match the key
     plus the document's exact scope values and never update scope columns.
+    Semantic deduplication also compares only matching scope values, including
+    eligible documents already accepted into the current batch.
     """
 
     def __init__(

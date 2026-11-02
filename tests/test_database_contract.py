@@ -199,3 +199,26 @@ def test_contract_closes_backend_when_validation_fails(monkeypatch):
         )
 
     assert backend.close_calls == 1
+
+
+@pytest.mark.parametrize("invalid_argument", ["embedding_function", "ranking_function"])
+def test_contract_closes_backend_when_callable_validation_fails(
+        monkeypatch, invalid_argument):
+    backend = FakeBackend(RetrievalDecision.merge_foreign([]))
+    monkeypatch.setattr(
+        hybrid_rag,
+        "TavilyClient",
+        lambda *_args, **_kwargs: pytest.fail("Tavily must not be created"),
+    )
+    functions = {
+        "embedding_function": lambda texts, _: [[0.1] for _text in texts],
+        "ranking_function": lambda _query, documents, _max_results: documents,
+    }
+    functions[invalid_argument] = "not-callable"
+
+    with pytest.raises(TypeError) as error:
+        TavilyHybridClient(api_key="tvly-test", database=backend, **functions)
+
+    assert str(error.value) == f"{invalid_argument} must be callable."
+    assert backend.validate_calls == 0
+    assert backend.close_calls == 1

@@ -101,12 +101,12 @@ class TavilyHybridClient():
 
         self.tavily = None
 
-        if not callable(self.embedding_function):
-            raise TypeError("embedding_function must be callable.")
-        if not callable(self.ranking_function):
-            raise TypeError("ranking_function must be callable.")
-
         try:
+            if not callable(self.embedding_function):
+                raise TypeError("embedding_function must be callable.")
+            if not callable(self.ranking_function):
+                raise TypeError("ranking_function must be callable.")
+
             self.database.validate()
             self.tavily = TavilyClient(api_key, session=session)
         except Exception:

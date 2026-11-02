@@ -280,6 +280,7 @@ def test_oracle_convenience_connection_params_create_connection(monkeypatch):
     )
 
     assert client.database.connection is created["connection"]
+    assert created["connection"].closed is False
     assert created["kwargs"] == {
         "user": "intern_user",
         "password": sentinel.oracle_credential,
@@ -317,3 +318,44 @@ def test_oracle_convenience_connection_not_opened_when_validation_fails(monkeypa
         )
 
     assert created["connect_called"] is False
+
+
+@pytest.mark.parametrize("invalid_argument", ["embedding_function", "ranking_function"])
+@pytest.mark.parametrize("managed_connection", [True, False], ids=["managed", "caller-owned"])
+def test_invalid_callable_preserves_oracle_connection_ownership(
+        monkeypatch, invalid_argument, managed_connection):
+    class FakeOracleConnection:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    connection = FakeOracleConnection()
+    if managed_connection:
+        monkeypatch.setitem(
+            sys.modules,
+            "oracledb",
+            types.SimpleNamespace(connect=lambda **_kwargs: connection),
+        )
+        database = OracleDB(
+            user="intern_user",
+            password=sentinel.oracle_credential,
+            dsn="localhost:1521/FREEPDB1",
+            table_name="tavily_documents",
+        )
+    else:
+        database = OracleDB(connection=connection, table_name="tavily_documents")
+    functions = {
+        "embedding_function": lambda texts, _: [[0.1] for _text in texts],
+        "ranking_function": lambda _query, documents, _max_results: documents,
+    }
+    functions[invalid_argument] = "not-callable"
+
+    with pytest.raises(TypeError) as error:
+        TavilyHybridClient(api_key="tvly-test", database=database, **functions)
+
+    assert str(error.value) == f"{invalid_argument} must be callable."
+    assert connection.close_calls == int(managed_connection)
+    database.close()
+    assert connection.close_calls == int(managed_connection)
