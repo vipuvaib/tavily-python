@@ -536,6 +536,7 @@ def should_write_memory_metadata(client):
 
 def build_persistence_metadata(client, result, query, cache_hit):
     write_memory_metadata = should_write_memory_metadata(client)
+    semantic_dedup_enabled = client.dedup_similarity_threshold is not None
     needs_cache_timestamp = (
         client.retrieval_mode in ORACLE_CACHE_RETRIEVAL_MODES
         or write_memory_metadata
@@ -543,6 +544,7 @@ def build_persistence_metadata(client, result, query, cache_hit):
     if not (
         client.enable_oracle_json_payload
         or client.enable_provenance_metadata
+        or semantic_dedup_enabled
         or write_memory_metadata
         or client.oracle_upsert_key is not None
         or needs_cache_timestamp
@@ -600,6 +602,13 @@ def build_persistence_metadata(client, result, query, cache_hit):
         content = result.get("content")
         if content:
             metadata[ORACLE_CONTENT_HASH_FIELD] = build_content_hash(content)
+
+    if semantic_dedup_enabled and not client.enable_provenance_metadata:
+        # Origin markers scope deduplication independently of detailed provenance.
+        table_columns = fetch_table_columns(client)
+        for column in (ORACLE_PROVIDER_NAME_FIELD, ORACLE_INSERTED_FROM_FIELD):
+            if column in table_columns:
+                metadata[column] = "tavily"
 
     return metadata
 
@@ -1055,14 +1064,14 @@ def delete_expired_cache_rows(client, cache_ttl_seconds=None):
     if ttl_seconds <= 0:
         raise ValueError("cache_ttl_seconds must be greater than 0.")
 
-    execute_kwargs = {
-        "cache_cutoff_timestamp": cache_cutoff_timestamp(ttl_seconds)
-    }
+    execute_kwargs = {}
     has_lifecycle_columns = (
         ORACLE_EXPIRES_AT_FIELD in table_columns
         and ORACLE_MEMORY_SCOPE_FIELD in table_columns
     )
     has_cache_timestamp = client.cache_timestamp_field in table_columns
+    if has_cache_timestamp:
+        execute_kwargs["cache_cutoff_timestamp"] = cache_cutoff_timestamp(ttl_seconds)
 
     if has_lifecycle_columns:
         legacy_timestamp_condition = (

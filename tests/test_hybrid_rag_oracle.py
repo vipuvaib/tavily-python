@@ -1,6 +1,7 @@
 # Copyright (c) 2026, Oracle and/or its affiliates.
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import re
 import sqlite3
 
 import pytest
@@ -99,6 +100,21 @@ class FakeConnection:
 
     def rollback(self):
         self.rolled_back = True
+
+
+class BindValidatingCursor(FakeCursor):
+    def execute(self, sql, **kwargs):
+        placeholders = set(re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", sql))
+        assert set(kwargs) == placeholders, (
+            f"SQL bind mismatch: supplied={set(kwargs)}, expected={placeholders}"
+        )
+        super().execute(sql, **kwargs)
+
+
+class BindValidatingConnection(FakeConnection):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.cursor_instance = BindValidatingCursor(**kwargs)
 
 
 class OracleTextFailingCursor(FakeCursor):
@@ -785,13 +801,20 @@ def test_oracle_cache_then_memory_memory_hit_skips_tavily_after_cache_miss():
     ]
 
 
-def test_oracle_max_local_zero_falls_back_to_foreign_in_all_modes_after_cleanup():
+@pytest.mark.parametrize("has_cache_timestamp", [False, True])
+def test_oracle_max_local_zero_falls_back_to_foreign_in_all_modes_after_cleanup(
+        has_cache_timestamp
+):
+    schema_rows = [
+        row for row in DEFAULT_SCHEMA_ROWS
+        if has_cache_timestamp or row[0] != "ADDED_AT"
+    ]
     for retrieval_mode in (
         "hybrid_search",
         "freshness_cache",
         "cache_then_memory",
     ):
-        connection = FakeConnection()
+        connection = BindValidatingConnection(schema_rows=schema_rows)
         client = create_oracle_client(
             api_key="tvly-test",
             connection=connection,
@@ -1046,6 +1069,47 @@ def test_oracle_content_hash_upsert_adds_stable_hash_key():
     assert len(kwargs["CONTENT_HASH"]) == 64
 
 
+@pytest.mark.parametrize("cache_timestamp_field", ["ADDED_AT", "CREATED_AT"])
+@pytest.mark.parametrize("has_cache_timestamp", [False, True])
+def test_oracle_cleanup_cache_binds_only_available_timestamp_predicates(
+        monkeypatch, cache_timestamp_field, has_cache_timestamp
+):
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    monkeypatch.setattr(oracle_database, "utc_now", lambda: now)
+    schema_rows = [
+        ("CONTENT", "CLOB"), ("EMBEDDINGS", "VECTOR"),
+        ("MEMORY_SCOPE", "VARCHAR2"), ("EXPIRES_AT", "TIMESTAMP WITH TIME ZONE"),
+        ("TENANT_ID", "VARCHAR2"),
+    ]
+    if has_cache_timestamp:
+        schema_rows.append((cache_timestamp_field, "TIMESTAMP"))
+    connection = BindValidatingConnection(rowcount=2, schema_rows=schema_rows)
+    database = OracleDB(
+        connection=connection,
+        table_name="tavily_documents",
+        cache_timestamp_field=cache_timestamp_field,
+        metadata_filters={"TENANT_ID": "A"},
+    )
+
+    assert database.cleanup_cache(cache_ttl_seconds=120) == 2
+
+    sql, bindings = connection.cursor_instance.executed_calls[-1]
+    assert bindings["memory_scope"] == "cache_only"
+    assert bindings["current_timestamp"] == now
+    assert "TENANT_ID = :metadata_filter_0" in sql
+    assert bindings["metadata_filter_0"] == "A"
+    if has_cache_timestamp:
+        assert f"{cache_timestamp_field} < :cache_cutoff_timestamp" in sql
+        assert bindings["cache_cutoff_timestamp"] == (
+            now.replace(tzinfo=None) - timedelta(seconds=120)
+        )
+    else:
+        assert "1 = 0" in sql
+        assert ":cache_cutoff_timestamp" not in sql
+        assert "cache_cutoff_timestamp" not in bindings
+    assert connection.committed is True
+
+
 def test_oracle_cleanup_cache_deletes_expired_cache_only_rows():
     connection = FakeConnection(rowcount=2)
     client = create_oracle_client(
@@ -1170,7 +1234,7 @@ def test_oracle_cleanup_cache_preserves_rows_outside_metadata_scope(
     schema_rows = [
         row for row in DEFAULT_SCHEMA_ROWS if row[0] not in missing_columns
     ] + [("TENANT_ID", "VARCHAR2"), ("REGION", "VARCHAR2")]
-    connection = FakeConnection(schema_rows=schema_rows)
+    connection = BindValidatingConnection(schema_rows=schema_rows)
     database = OracleDB(
         connection=connection,
         table_name="tavily_documents",
@@ -1244,8 +1308,15 @@ def test_oracle_cleanup_cache_preserves_rows_outside_metadata_scope(
 
 
 @pytest.mark.parametrize("metadata_filters", [{}, {"TENANT_ID": "A"}])
-def test_oracle_auto_cleanup_runs_before_search_once_per_interval(metadata_filters):
-    connection = FakeConnection(rowcount=2)
+@pytest.mark.parametrize("has_cache_timestamp", [False, True])
+def test_oracle_auto_cleanup_runs_before_search_once_per_interval(
+        metadata_filters, has_cache_timestamp
+):
+    schema_rows = [
+        row for row in DEFAULT_SCHEMA_ROWS
+        if has_cache_timestamp or row[0] != "ADDED_AT"
+    ] + [("TENANT_ID", "VARCHAR2")]
+    connection = BindValidatingConnection(rowcount=2, schema_rows=schema_rows)
     client = create_oracle_client(
         api_key="tvly-test",
         connection=connection,
