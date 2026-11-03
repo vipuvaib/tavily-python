@@ -309,6 +309,127 @@ tavily_client.feedback(
 )
 ```
 
+# Tavily Hybrid RAG
+
+`TavilyHybridClient` combines Tavily Search with a configured local database
+adapter. This fork adds Oracle retrieval, caching, and durable memory through
+a common backend contract while preserving historical MongoDB calls.
+
+| Adapter | Local behavior |
+| --- | --- |
+| `MongoDB` | MongoDB Atlas vector search, optional Tavily results, and reranking. |
+| `OracleDB` | Hybrid merge, fresh-cache reuse, or cache-then-memory routing. |
+
+## Install for this fork
+
+From this repository's `upstream-port` checkout:
+
+```bash
+python -m pip install -e .
+python -m pip install cohere
+# Install the driver needed by your application:
+python -m pip install oracledb
+# For MongoDB instead:
+python -m pip install pymongo
+```
+
+This branch does not define `oracle`, `mongodb`, or `hybrid` extras.
+The default embedding and reranking helpers use Cohere and require
+`CO_API_KEY` before Python imports the SDK. Applications can supply custom
+`embedding_function` and `ranking_function` callables instead.
+
+## MongoDB example
+
+The application owns the MongoDB connection and supplies a collection with
+a cosine `vectorSearch` index:
+
+```python
+import os
+
+from pymongo import MongoClient
+from tavily import TavilyHybridClient
+from tavily.databases.mongodb import MongoDB
+
+mongo = MongoClient(os.environ["MONGO_URI"])
+collection = mongo[os.environ["MONGO_DATABASE"]][os.environ["MONGO_COLLECTION"]]
+
+client = TavilyHybridClient(
+    api_key=os.environ["TAVILY_API_KEY"],
+    database=MongoDB(collection=collection, index=os.environ["MONGO_INDEX"]),
+)
+try:
+    results = client.search(
+        "Oracle vector search",
+        max_local=5,
+        max_foreign=5,
+        save_foreign=True,
+    )
+finally:
+    client.close()
+    mongo.close()
+```
+
+Legacy `db_provider="mongodb"` keyword calls and their historical
+positional form remain supported by `legacy_handling.py`. New code should
+pass a configured adapter. MongoDB currently requires a positive local limit;
+`max_foreign=0` disables Tavily.
+
+## OracleDB example
+
+Create the table described in the
+[Oracle integration guide](examples/oracle/integration.md) first.
+This example lets the adapter own its connection:
+
+```python
+import os
+
+from tavily import TavilyHybridClient
+from tavily.databases.oracledb import OracleDB
+
+client = TavilyHybridClient(
+    api_key=os.environ["TAVILY_API_KEY"],
+    database=OracleDB(
+        user=os.environ["ORACLE_USER"],
+        password=os.environ["ORACLE_PASSWORD"],
+        dsn=os.environ["ORACLE_DSN"],
+        table_name="TAVILY_DOCUMENTS",
+        retrieval_mode="hybrid_search",
+    ),
+)
+try:
+    results = client.search("Oracle vector search", max_results=5, save_foreign=True)
+finally:
+    client.close()
+```
+
+You can instead inject an existing Oracle connection, which remains
+caller-owned. Oracle options belong on `OracleDB`; the legacy provider-string
+bridge supports MongoDB only.
+
+`hybrid_search` merges and reranks local and Tavily candidates.
+`freshness_cache` returns fresh Oracle hits before calling Tavily.
+`cache_then_memory` checks fresh cache, then durable memory, then Tavily.
+Oracle's `max_local=0` selects foreign fallback without reranking.
+
+Search results contain `content`, `score`, and `origin` (`"local"`
+or `"foreign"`). `save_foreign=True` embeds selected Tavily results
+and lets the adapter map and persist them. A callable can build custom storage
+documents. Persistence caps and score filters affect writes, not the returned
+candidates.
+
+## Hybrid RAG documentation
+
+- [Database adapter architecture](tavily/databases/architecture.md):
+  contract, resource ownership, MongoDB compatibility, and adding a provider.
+- [MongoDB guide](tavily/databases/mongodb/README.md):
+  collection/index requirements, persistence, and legacy construction.
+- [OracleDB guide](tavily/databases/oracledb/README.md):
+  schema, options, ownership scope, deduplication, cleanup, and indexes.
+- [Oracle architecture](tavily/databases/oracledb/architecture.md):
+  routing and persistence diagrams, score behavior, and partial-schema rules.
+- [Oracle integration walkthrough](examples/oracle/integration.md):
+  setup, mode examples, provenance queries, and scoped writes.
+
 ## Advanced: Custom Session / Client Injection
 
 For enterprise environments that proxy Tavily traffic through an API gateway (e.g., for centralized auth, logging, or policy enforcement), you can pass a pre-configured HTTP session instead of a Tavily API key.
