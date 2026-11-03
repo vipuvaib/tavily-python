@@ -155,6 +155,34 @@ def test_async_search_exact_match_query_quotes_escaped_in_payload(async_intercep
     assert r'\"John Smith\"' in request.body
     assert request.json()["query"] == '"John Smith" CEO Acme Corp'
 
+def test_sync_search_fetch_timeout_cache_fallback_not_sent_by_default(sync_interceptor, sync_client):
+    sync_interceptor.set_response(200, json=dummy_response)
+    sync_client.search("What is Tavily?")
+    request = sync_interceptor.get_request()
+    assert "fetch_timeout" not in request.json()
+    assert "cache_fallback" not in request.json()
+
+def test_sync_search_fetch_timeout_cache_fallback(sync_interceptor, sync_client):
+    sync_interceptor.set_response(200, json=dummy_response)
+    sync_client.search("What is Tavily?", fetch_timeout=15, cache_fallback=True)
+    request = sync_interceptor.get_request()
+    assert request.json()["fetch_timeout"] == 15
+    assert request.json()["cache_fallback"] is True
+
+def test_async_search_fetch_timeout_cache_fallback_not_sent_by_default(async_interceptor, async_client):
+    async_interceptor.set_response(200, json=dummy_response)
+    asyncio.run(async_client.search("What is Tavily?"))
+    request = async_interceptor.get_request()
+    assert "fetch_timeout" not in request.json()
+    assert "cache_fallback" not in request.json()
+
+def test_async_search_fetch_timeout_cache_fallback(async_interceptor, async_client):
+    async_interceptor.set_response(200, json=dummy_response)
+    asyncio.run(async_client.search("What is Tavily?", fetch_timeout=15, cache_fallback=True))
+    request = async_interceptor.get_request()
+    assert request.json()["fetch_timeout"] == 15
+    assert request.json()["cache_fallback"] is True
+
 def test_sync_search_language_not_sent_by_default(sync_interceptor, sync_client):
     sync_interceptor.set_response(200, json=dummy_response)
     sync_client.search("What is Tavily?")
@@ -196,3 +224,34 @@ def test_async_search_language_only_no_filter(async_interceptor, async_client):
     request = async_interceptor.get_request()
     assert request.json()["language"] == "french"
     assert "filter_by_language" not in request.json()
+
+def test_sync_search_max_age_hours_not_sent_by_default(sync_interceptor, sync_client):
+    sync_interceptor.set_response(200, json=dummy_response)
+    sync_client.search("What is Tavily?")
+    request = sync_interceptor.get_request()
+    assert "max_age_hours" not in request.json()
+    assert "max_hours" not in request.json()
+
+def test_sync_search_max_age_hours(sync_interceptor, sync_client):
+    sync_interceptor.set_response(200, json=dummy_response)
+    sync_client.search("What is Tavily?", max_age_hours=24)
+    request = sync_interceptor.get_request()
+    assert request.json()["max_age_hours"] == 24
+
+def test_sync_search_legacy_max_hours_passes_through(sync_interceptor, sync_client):
+    sync_interceptor.set_response(200, json=dummy_response)
+    sync_client.search("What is Tavily?", max_hours=24)
+    request = sync_interceptor.get_request()
+    assert request.json()["max_hours"] == 24
+
+def test_async_search_max_age_hours(async_interceptor, async_client):
+    async_interceptor.set_response(200, json=dummy_response)
+    asyncio.run(async_client.search("What is Tavily?", max_age_hours=24))
+    request = async_interceptor.get_request()
+    assert request.json()["max_age_hours"] == 24
+
+def test_async_search_legacy_max_hours_passes_through(async_interceptor, async_client):
+    async_interceptor.set_response(200, json=dummy_response)
+    asyncio.run(async_client.search("What is Tavily?", max_hours=24))
+    request = async_interceptor.get_request()
+    assert request.json()["max_hours"] == 24
