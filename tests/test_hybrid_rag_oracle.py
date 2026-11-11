@@ -249,7 +249,7 @@ def test_oracle_search_uses_vector_distance_without_touching_mongodb_collection(
     sql, kwargs = connection.cursor_instance.executed
     assert "VECTOR_DISTANCE(EMBEDDINGS, :query_vector, COSINE)" in sql
     assert "FROM TAVILY_DOCUMENTS" in sql
-    assert "FETCH FIRST 1 ROWS ONLY" in sql
+    assert "FETCH EXACT FIRST 1 ROWS ONLY" in sql
     assert kwargs["query_vector"].typecode == "f"
     assert list(kwargs["query_vector"]) == pytest.approx([0.1, 0.2, 0.3])
     assert results == [{"content": "local content", "score": 0.75, "origin": "local"}]
@@ -792,7 +792,7 @@ def test_oracle_cache_then_memory_memory_hit_skips_tavily_after_cache_miss():
     assert "MEMORY_SCOPE IN (:memory_scope_0, :memory_scope_1)" in cache_sql
     assert cache_kwargs["memory_scope_0"] == "cache_only"
     assert cache_kwargs["memory_scope_1"] == "cache_plus_memory"
-    assert "FETCH FIRST 1 ROWS ONLY" in memory_sql
+    assert "FETCH EXACT FIRST 1 ROWS ONLY" in memory_sql
     assert "MEMORY_SCOPE IN (:memory_scope_0)" in memory_sql
     assert memory_kwargs["memory_scope_0"] == "cache_plus_memory"
     assert connection.cursor_instance.executemany_call is None
@@ -1500,7 +1500,7 @@ def test_oracle_semantic_dedup_skips_near_duplicate_foreign_insert():
     ]
     assert connection.cursor_instance.executemany_call is None
     assert connection.committed is False
-    assert "FETCH FIRST 1 ROWS ONLY" in connection.cursor_instance.executed_calls[-1][0]
+    assert "FETCH EXACT FIRST 1 ROWS ONLY" in connection.cursor_instance.executed_calls[-1][0]
 
 
 def test_oracle_semantic_dedup_is_scoped_to_tavily_rows_and_live_cache():

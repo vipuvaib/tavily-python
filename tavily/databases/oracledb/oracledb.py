@@ -297,6 +297,7 @@ def search_vector(client, query_embeddings, max_local, cache_ttl_seconds=None,
     )
     metadata_filter = build_metadata_filter(client.oracle_metadata_filters, execute_kwargs)
     memory_scope_filter = build_memory_scope_filter(client, memory_scopes, execute_kwargs)
+    fetch_clause = vector_fetch_clause(client, limit)
 
     sql = f"""
             SELECT {client.content_field},
@@ -308,7 +309,7 @@ def search_vector(client, query_embeddings, max_local, cache_ttl_seconds=None,
               {metadata_filter}
               {memory_scope_filter}
             ORDER BY {vector_distance}
-            FETCH FIRST {limit} ROWS ONLY
+            {fetch_clause}
         """
 
     with client.connection.cursor() as cursor:
@@ -346,6 +347,52 @@ def vector_distance_expression(client):
     )
 
 
+def validate_vector_search(mode, index_type, accuracy, probes, efsearch):
+    if not isinstance(mode, str) or mode.lower() not in ("exact", "approx"):
+        raise ValueError("vector_search_mode must be 'exact' or 'approx'.")
+    mode = mode.lower()
+    controls = {
+        "vector_search_accuracy": accuracy,
+        "vector_search_probes": probes,
+        "vector_search_efsearch": efsearch,
+    }
+    supplied = [name for name, value in controls.items() if value is not None]
+    if supplied and mode != "approx":
+        raise ValueError("Vector search controls require vector_search_mode='approx'.")
+    if len(supplied) > 1:
+        raise ValueError("Set only one of vector_search_accuracy, vector_search_probes, or vector_search_efsearch.")
+    for name in supplied:
+        value = controls[name]
+        if isinstance(value, bool) or not isinstance(value, int) or int(value) < 1:
+            raise ValueError(f"{name} must be a positive integer.")
+    if accuracy is not None and int(accuracy) > 100:
+        raise ValueError("vector_search_accuracy must be between 1 and 100.")
+    if probes is not None and index_type != "IVF":
+        raise ValueError("vector_search_probes requires vector_index_type='IVF'.")
+    if efsearch is not None and index_type != "HNSW":
+        raise ValueError("vector_search_efsearch requires vector_index_type='HNSW'.")
+    return mode
+
+
+def vector_fetch_clause(client, limit):
+    """Give each validated optimizer setting its own statement and plan."""
+    accuracy = client.vector_search_accuracy
+    probes = client.vector_search_probes
+    efsearch = client.vector_search_efsearch
+    mode = validate_vector_search(client.vector_search_mode, client.vector_index_type,
+                                  accuracy, probes, efsearch)
+    if mode == "exact":
+        return f"FETCH EXACT FIRST {limit} ROWS ONLY"
+    clause = f"FETCH APPROX FIRST {limit} ROWS ONLY"
+    if accuracy is not None:
+        return clause + f" WITH TARGET ACCURACY {int(accuracy)}"
+    if probes is not None:
+        return clause + f" WITH TARGET ACCURACY PARAMETERS (NEIGHBOR PARTITION PROBES {int(probes)})"
+    if efsearch is not None:
+        return clause + f" WITH TARGET ACCURACY PARAMETERS (EFSEARCH {int(efsearch)})"
+    return clause
+
+
 def search_native_hybrid(client, query_embeddings, max_local, query,
                          cache_ttl_seconds=None, memory_scopes=None):
     limit = int(max_local)
@@ -374,6 +421,7 @@ def search_native_hybrid(client, query_embeddings, max_local, query,
     )
     metadata_filter = build_metadata_filter(client.oracle_metadata_filters, execute_kwargs)
     memory_scope_filter = build_memory_scope_filter(client, memory_scopes, execute_kwargs)
+    fetch_clause = vector_fetch_clause(client, limit)
 
     sql = f"""
             WITH vector_candidates AS (
@@ -386,7 +434,7 @@ def search_native_hybrid(client, query_embeddings, max_local, query,
                   {metadata_filter}
                   {memory_scope_filter}
                 ORDER BY {vector_distance}
-                FETCH FIRST {limit} ROWS ONLY
+                {fetch_clause}
             ),
             text_candidates AS (
                 SELECT ROWID AS rid,
@@ -665,7 +713,7 @@ def is_duplicate(client, embedding, document, pending_documents=()):
                   {metadata_filter}
                   {dedup_filter}
                 ORDER BY {vector_distance}
-                FETCH FIRST 1 ROWS ONLY
+                FETCH EXACT FIRST 1 ROWS ONLY
             """
             cursor.execute(sql, **bindings)
             row = cursor.fetchone()
@@ -1236,6 +1284,11 @@ class OracleDB:
             password: Optional[str] = None,
             dsn: Optional[str] = None,
             connection_kwargs: Optional[dict] = None,
+            *,
+            vector_search_mode: str = "exact",
+            vector_search_accuracy: Optional[int] = None,
+            vector_search_probes: Optional[int] = None,
+            vector_search_efsearch: Optional[int] = None,
     ):
         if retrieval_mode not in ("hybrid_search", *ORACLE_CACHE_RETRIEVAL_MODES):
             raise ValueError(
@@ -1331,6 +1384,13 @@ class OracleDB:
         self.vector_index_neighbors = vector_index_neighbors
         self.vector_index_efconstruction = vector_index_efconstruction
         self.vector_index_partitions = vector_index_partitions
+        self.vector_search_mode = validate_vector_search(
+            vector_search_mode, self.vector_index_type, vector_search_accuracy,
+            vector_search_probes, vector_search_efsearch,
+        )
+        self.vector_search_accuracy = vector_search_accuracy
+        self.vector_search_probes = vector_search_probes
+        self.vector_search_efsearch = vector_search_efsearch
         self.dedup_similarity_threshold = (
             _finite_float(dedup_similarity_threshold, "dedup_similarity_threshold")
             if dedup_similarity_threshold is not None else None

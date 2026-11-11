@@ -60,7 +60,7 @@ class StoredRowsCursor(FakeCursor):
         if "USER_TAB_COLUMNS" not in sql:
             # Adapt Oracle syntax, preserving the actual WHERE predicates.
             sql = sql.replace(", COSINE)", ", 'COSINE')").replace(
-                "FETCH FIRST 1 ROWS ONLY", "LIMIT 1"
+                "FETCH EXACT FIRST 1 ROWS ONLY", "LIMIT 1"
             ).replace("FROM DUAL", "")
             self.active_rows = self.store.execute(sql, sqlite_bindings(kwargs)).fetchall()
 

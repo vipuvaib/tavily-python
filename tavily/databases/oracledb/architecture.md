@@ -11,6 +11,15 @@ The adapter can run automatic cleanup, then returns a
 `RetrievalDecision`. Both cache and memory use the request's `max_local`
 candidate limit and trim successful hits to `max_results`.
 
+`vector_search_mode="exact"` is the default for every vector lookup, including
+native-hybrid vector candidates and cache/memory tiers. Opt-in `"approx"` uses
+explicit `FETCH APPROX` and an optional validated target accuracy, IVF probe count,
+or HNSW EFSEARCH value. These query settings are separate from index creation
+parameters. Semantic deduplication always uses `FETCH EXACT` because search
+recall must not determine duplicate eligibility. See the
+[query configuration](README.md#exact-and-approximate-vector-search) for options
+and the migration from implicit `FETCH FIRST` behavior.
+
 ```mermaid
 flowchart TD
     Query[User query] --> Embed[Shared query embedding]

@@ -74,6 +74,54 @@ results. Automatic cleanup can still run before that routing decision.
 Both cache and memory use `max_local` as their candidate limit. There is no
 `memory_max_results` setting.
 
+## Exact and approximate vector search
+
+Vector lookups now use `FETCH EXACT` by default, including cache/memory lookups
+and the vector candidates in native hybrid search. This makes top-k retrieval
+independent of Oracle's implicit ANN selection after an index is created.
+Existing callers previously used `FETCH FIRST` without an exactness keyword;
+those queries could use approximate vector search. Exact search can cost more
+on large tables. Index creation and existing index definitions are unchanged.
+
+Set `vector_search_mode="approx"` to opt in to approximate retrieval. The query
+can still fall back to exact execution if Oracle cannot use the vector index.
+An approximate query does not guarantee its requested accuracy or a speedup.
+
+| Query setting | Meaning |
+| --- | --- |
+| `vector_search_mode` | `"exact"` (default) or `"approx"`. Independent of `retrieval_mode`'s cache/routing policy. |
+| `vector_search_accuracy` | Optional integer 1–100 for either index type. A target, not an exactness guarantee, even at 100. |
+| `vector_search_probes` | Optional positive integer for IVF `NEIGHBOR PARTITION PROBES`; requires `vector_index_type="IVF"`. |
+| `vector_search_efsearch` | Optional positive integer for HNSW `EFSEARCH`; requires `vector_index_type="HNSW"`. |
+
+The three tuning settings require approximate mode and are mutually exclusive.
+They are rendered as validated integer SQL literals so each optimizer setting
+gets its own statement/plan; embeddings and metadata remain bound parameters.
+Without a tuning setting, an approximate
+query inherits the index's accuracy. `vector_index_accuracy`, partitions,
+neighbors and construction settings still configure **index creation**, not
+these query-time controls. Set `vector_index_type` to match the intended index.
+Tuning values must be measured for the actual corpus; no probe count is assumed
+to work universally. Oracle enforces its server-specific parameter limits.
+
+```python
+database = OracleDB(
+    connection=connection,
+    table_name="TAVILY_DOCUMENTS",
+    vector_index_type="IVF",
+    vector_search_mode="approx",
+    vector_search_probes=16,
+)
+```
+
+The setting applies to vector retrieval in all routing modes, including cache
+and memory, and to native-hybrid vector candidates and recognized Text-error
+fallback. Approximate retrieval may miss a row that meets a cache/memory score
+threshold. Semantic deduplication always uses `FETCH EXACT`, independently of
+retrieval mode, so approximate recall does not govern whether a write is skipped.
+Native hybrid search still combines bounded vector and Oracle Text candidate
+sets; exact vector candidates do not mean an exhaustive combined-score ranking.
+
 ## Table and metadata
 
 Vector retrieval needs the configured text and `VECTOR` columns. The
