@@ -1,0 +1,22 @@
+.venv/
+.artifacts/
+__pycache__/
+.pytest_cache/
+.deps/
+
+# Private configuration and generated runtime files
+.env
+.env.*
+*.env
+.private/
+private/
+.oci/
+wallet/
+wallets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+.coverage
+.coverage.*

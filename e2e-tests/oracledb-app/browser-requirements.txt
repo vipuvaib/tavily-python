@@ -1,0 +1,5 @@
+# Internal browser demo only. Install the recorded fork wheel separately.
+oracledb==26.1.0
+cohere==7.3.1
+oci==2.173.1
+python-dotenv==1.2.4

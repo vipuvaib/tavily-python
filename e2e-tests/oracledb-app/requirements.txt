@@ -1,0 +1,4 @@
+build>=1.2,<2
+oracledb>=3,<27
+python-dotenv>=1,<2
+pytest>=8,<10

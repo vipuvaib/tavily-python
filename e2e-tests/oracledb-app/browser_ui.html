@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tavily × Oracle · Live RAG</title>
+  <style>
+    :root{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e9eef4;background:#0d141d;color-scheme:dark;--muted:#9aaabd;--line:#283747;--green:#9beaaf;--blue:#9ecaff}*{box-sizing:border-box}body{margin:0}main{max-width:1260px;margin:0 auto;padding:34px 32px 56px}header{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:34px}.brand{font-size:15px;font-weight:650;letter-spacing:.04em}.brand span{color:var(--muted);font-weight:400}.badge{border:1px solid #385947;border-radius:20px;padding:6px 12px;font-size:12px;color:var(--green);white-space:nowrap}.eyebrow{font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:var(--green);margin:0 0 12px}h1{font-size:39px;letter-spacing:-.04em;line-height:1.15;margin:0 0 14px;font-weight:600}.intro{color:var(--muted);font-size:15px;line-height:1.65;max-width:720px;margin:0 0 27px}.pipeline{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:30px}.pipeline span{font-size:12px;border:1px solid var(--line);border-radius:7px;padding:8px 12px;background:#121d28}.pipeline b{color:#5e748b;font-size:14px}.layout{display:grid;grid-template-columns:360px minmax(0,1fr);gap:24px;align-items:start}.panel{background:#131e2a;border:1px solid var(--line);border-radius:14px;padding:23px}.panel h2{font-size:17px;font-weight:550;margin:0 0 20px}.label{font-size:12px;color:var(--muted);display:block;margin-bottom:9px}textarea{resize:vertical;width:100%;min-height:132px;border:1px solid #405269;border-radius:9px;background:#0d1722;padding:13px;font:14px/1.6 inherit;color:inherit;outline:none}textarea:focus{border-color:var(--green);box-shadow:0 0 0 2px #9beaaf19}.choice{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted);line-height:1.5;margin:15px 0 20px}input{accent-color:#9beaaf}button{border:0;border-radius:8px;cursor:pointer;font:600 13px inherit;padding:12px 15px}button.primary{background:var(--green);color:#13281b;width:100%}button:disabled{opacity:.5;cursor:wait}.secondary{background:transparent;color:var(--blue);border:1px solid #354a62;margin-top:10px;width:100%}.hint{font-size:12px;line-height:1.7;color:var(--muted);margin:18px 0 0}.divider{border-top:1px solid var(--line);margin:24px 0 18px}.meta{font-size:12px;color:var(--muted);line-height:1.8;overflow-wrap:anywhere}.meta strong{color:#ccd8e6;font-weight:450}.answer-top{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px}.answer-top h2{margin:0}.route{font-size:11px;color:var(--blue);background:#1e3349;padding:6px 9px;border-radius:6px}.answer{font-size:15px;line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere;min-height:100px}.empty{color:#8a9cb0}.progress{font-size:13px;color:var(--green);margin:12px 0}.error{background:#3c2429;border:1px solid #76404c;border-radius:8px;color:#ffd0d9;font-size:13px;padding:14px;line-height:1.6;margin-bottom:18px}.sources{display:grid;gap:12px;margin-top:24px}.source{border:1px solid var(--line);border-radius:9px;padding:15px;font-size:12px;background:#101a25}.source a{color:var(--blue);text-decoration:none;font-size:13px;line-height:1.5;overflow-wrap:anywhere}.source p{color:#abbacc;line-height:1.7;margin:10px 0 0;white-space:pre-wrap}.source small{color:var(--muted);display:block;margin-top:8px}.evidence{margin-top:20px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.metric{background:#101a25;border:1px solid var(--line);border-radius:9px;padding:13px}.metric strong{font-size:22px;font-weight:550;display:block;margin-bottom:5px}.metric span{font-size:11px;color:var(--muted)}details{margin-top:20px;font-size:12px;color:var(--muted)}summary{cursor:pointer}pre{font:11px/1.7 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#0c1520;border-radius:8px;padding:15px;color:#a6bed8}footer{font-size:11px;color:#71859c;margin-top:30px}.light{color:var(--green)}@media(max-width:850px){main{padding:24px 18px}.layout{grid-template-columns:1fr}h1{font-size:31px}.metrics{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start}.panel{padding:19px}}
+  </style>
+</head>
+<body><main>
+  <header><div class="brand">TAVILY <span>×</span> ORACLE <span> / integration lab</span></div><div class="badge" id="health">Connecting…</div></header>
+  <p class="eyebrow">Live retrieval-augmented generation</p><h1>From the web to a grounded answer.</h1>
+  <p class="intro">Ask a question with live Tavily search, retain its sources in Oracle, and generate an answer with OCI. Repeat the same question to verify that Oracle supplies the context.</p>
+  <div class="pipeline" aria-label="RAG pipeline"><span>Tavily search</span><b>→</b><span>Oracle vector cache</span><b>→</b><span>OCI live model</span><b>→</b><span>Answer + sources</span></div>
+  <div id="error" class="error" role="alert" hidden></div>
+  <div class="layout">
+    <section class="panel"><h2>Ask a question</h2>
+      <form id="question-form"><label class="label" for="query">Research question</label><textarea id="query" name="query" maxlength="1000" required>How does Oracle Database use the VECTOR data type for similarity search?</textarea>
+      <label class="choice"><input id="refresh" type="checkbox">Refresh from the web, even if cached</label>
+      <button class="primary" id="ask" type="submit">Ask live model</button><button class="secondary" id="repeat" type="button">Repeat same question</button></form>
+      <p class="hint">Cache entries are scoped to this test run and the exact question, with a 24-hour lifetime. Every answer is newly generated by the live model.</p>
+      <div class="divider"></div><div class="meta" id="configuration">Checking the retained Oracle fixture…</div>
+    </section>
+    <div>
+      <section class="panel"><div class="answer-top"><h2>Answer</h2><span class="route" id="route">Waiting for a question</span></div>
+        <div class="progress" id="progress" role="status" aria-live="polite" hidden></div>
+        <div class="answer empty" id="answer">Your answer and its retrieved source excerpts will appear here.</div><div class="sources" id="sources"></div>
+      </section>
+      <section class="panel evidence" aria-label="Retrieval evidence"><h2>Retrieval evidence</h2><div class="metrics">
+        <div class="metric"><strong id="web-calls">—</strong><span>Tavily calls this query</span></div><div class="metric"><strong id="rows">—</strong><span>Committed source rows</span></div>
+        <div class="metric"><strong id="model-calls">—</strong><span>Live model calls</span></div><div class="metric"><strong id="duration">—</strong><span>Total seconds</span></div>
+      </div><p class="hint" id="integrity">Independent database reads verify committed rows before and after retrieval.</p>
+        <details><summary>Inspect this request</summary><pre id="trace">No request yet.</pre></details>
+      </section>
+    </div>
+  </div><footer>Internal test application · Fixed configured model · Exact Oracle vector retrieval · No conversation-memory or calculator claim</footer>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  let state = null, busy = false;
+  function showError(text) { $('error').textContent = text; $('error').hidden = !text; }
+  async function status() {
+    const response = await fetch('/api/status');
+    const value = await response.json();
+    if (!response.ok) throw new Error(value.error || 'The live demo is unavailable.');
+    state = value; $('health').textContent = 'Live services ready';
+    const config = $('configuration'); config.replaceChildren();
+    for (const [label,text] of [['Model',value.model],['Oracle',value.database_version],['SDK',value.sdk_version+' · '+value.revision],['Vector lookup','Exact · Cohere FLOAT32 × 1024'],['Run',value.run_id],['Live web requests',value.counts.tavily+' / '+value.maximum_web_calls]]) {
+      const row = document.createElement('div'), strong = document.createElement('strong'); strong.textContent = label+': '; row.append(strong,document.createTextNode(text));config.append(row);
+    }
+    return value;
+  }
+  function render(value) {
+    const t = value.trace; $('answer').classList.remove('empty'); $('answer').textContent = value.answer;
+    $('route').textContent = t.route === 'oracle_cache' ? 'Oracle cache hit' : 'Live Tavily search';
+    $('web-calls').textContent = t.tavily_calls; $('rows').textContent = t.rows_after; $('model-calls').textContent = t.model_calls; $('duration').textContent = (t.elapsed_ms/1000).toFixed(1);
+    $('integrity').textContent = t.route === 'oracle_cache' ? 'Verified: zero Tavily calls, local source results, and unchanged persisted rows.' : 'Verified: live web retrieval and committed sources read back through an independent Oracle connection.';
+    $('trace').textContent = JSON.stringify({request_id:value.request_id,...t},null,2);
+    $('sources').replaceChildren();
+    value.sources.forEach((source,index)=>{
+      const card=document.createElement('article');card.className='source';
+      const link=document.createElement('a');link.textContent='['+(index+1)+'] '+(source.title||'Retrieved source');
+      if(source.url && /^https?:\/\//i.test(source.url)){link.href=source.url;link.target='_blank';link.rel='noopener noreferrer';}
+      const text=document.createElement('p');text.textContent=source.content;
+      const meta=document.createElement('small');meta.textContent=(source.origin==='local'?'Oracle cache':'Tavily web')+' · score '+source.score.toFixed(4);
+      card.append(link,text,meta);$('sources').append(card);
+    });
+  }
+  async function ask(event) {
+    if(event)event.preventDefault();if(busy)return;
+    const query=$('query').value.trim();if(!query){showError('Enter a question first.');return;}
+    busy=true;showError('');$('ask').disabled=true;$('repeat').disabled=true;$('progress').hidden=false;$('progress').textContent='Retrieving context and waiting for the live OCI answer…';
+    $('answer').textContent='';$('sources').replaceChildren();$('route').textContent='Live request in progress';
+    try {
+      if(!state)await status();
+      const response=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json','X-Demo-Token':state.csrf_token},body:JSON.stringify({query,refresh:$('refresh').checked})});
+      const value=await response.json();if(!response.ok)throw new Error(value.error||'The live request failed.');render(value);await status();
+    } catch(error){showError(error.message);$('route').textContent='Request failed';$('answer').textContent='No fallback answer was generated.';}
+    finally{busy=false;$('ask').disabled=false;$('repeat').disabled=false;$('progress').hidden=true;}
+  }
+  $('question-form').addEventListener('submit',ask);$('repeat').addEventListener('click',()=>{$('refresh').checked=false;ask();});
+  status().catch(error=>{showError(error.message);$('health').textContent='Service unavailable';});
+</script></body></html>
